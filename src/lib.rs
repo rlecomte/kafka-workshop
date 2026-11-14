@@ -6,10 +6,6 @@
 //! - [`apis`] : la liste des API (et versions) que le broker annonce ;
 //! - [`topics`] : le registre des topics et de leurs partitions.
 
-// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
-// certains imports, paramètres et fonctions ne servent pas encore.
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
-
 pub mod apis;
 pub mod handlers;
 pub mod server;

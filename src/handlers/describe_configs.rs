@@ -18,10 +18,28 @@ pub const RESOURCE_BROKER: i8 = 4;
 
 impl Broker {
     pub(super) fn handle_describe_configs(&self, request: DescribeConfigsRequest) -> DescribeConfigsResponse {
-        todo!("ch.1 : handle_describe_configs")
+        let results = request.resources.into_iter().map(|r| self.describe_resource(r)).collect();
+        DescribeConfigsResponse::default().with_results(results)
     }
 
     fn describe_resource(&self, resource: DescribeConfigsResource) -> DescribeConfigsResult {
-        todo!("ch.1 : describe_resource")
+        let error = match resource.resource_type {
+            RESOURCE_TOPIC if self.topics.get(resource.resource_name.as_str()).is_none() => {
+                Some(ResponseError::UnknownTopicOrPartition)
+            }
+            RESOURCE_TOPIC => None,
+            RESOURCE_BROKER if resource.resource_name.as_str() == self.config.node_id.to_string() => None,
+            RESOURCE_BROKER => Some(ResponseError::InvalidRequest),
+            _ => Some(ResponseError::InvalidRequest),
+        };
+        let result = DescribeConfigsResult::default()
+            .with_resource_type(resource.resource_type)
+            .with_resource_name(resource.resource_name);
+        match error {
+            None => result,
+            Some(e) => result
+                .with_error_code(e.code())
+                .with_error_message(Some(StrBytes::from_string(format!("{e:?}")))),
+        }
     }
 }

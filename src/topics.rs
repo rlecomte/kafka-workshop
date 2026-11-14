@@ -85,25 +85,61 @@ impl Topics {
     /// Vérifie qu'un topic peut être créé, et le crée sauf si `validate_only`.
     /// Renvoie le topic (créé, ou tel qu'il aurait été créé).
     pub fn create(&self, new: NewTopic, validate_only: bool) -> Result<Arc<Topic>, TopicError> {
-        todo!("ch.1 : create")
+        validate_name(&new.name)?;
+        if new.num_partitions < 1 {
+            return Err(TopicError::InvalidPartitions(new.num_partitions));
+        }
+        // Un seul broker : on ne peut pas avoir plus d'une réplique.
+        if new.replication_factor != 1 {
+            return Err(TopicError::InvalidReplicationFactor(new.replication_factor));
+        }
+
+        let mut topics = self.topics.write().unwrap();
+        if topics.contains_key(&new.name) {
+            return Err(TopicError::AlreadyExists(new.name));
+        }
+        let topic = Arc::new(Topic {
+            name: new.name.clone(),
+            id: Uuid::new_v4(),
+            partitions: (0..new.num_partitions).map(|index| Partition { index }).collect(),
+        });
+        if !validate_only {
+            topics.insert(new.name, topic.clone());
+        }
+        Ok(topic)
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<Topic>> {
-        todo!("ch.1 : get")
+        self.topics.read().unwrap().get(name).cloned()
     }
 
     pub fn get_by_id(&self, id: Uuid) -> Option<Arc<Topic>> {
-        todo!("ch.1 : get_by_id")
+        self.topics.read().unwrap().values().find(|t| t.id == id).cloned()
     }
 
     /// Tous les topics, triés par nom.
     pub fn list(&self) -> Vec<Arc<Topic>> {
-        todo!("ch.1 : list")
+        self.topics.read().unwrap().values().cloned().collect()
     }
 }
 
 /// Règles de nommage de Kafka : 1 à 249 caractères parmi `[a-zA-Z0-9._-]`,
 /// et ni `.` ni `..`.
 pub fn validate_name(name: &str) -> Result<(), TopicError> {
-    todo!("ch.1 : validate_name")
+    if name.is_empty() {
+        return Err(TopicError::InvalidName("le nom est vide".into()));
+    }
+    if name == "." || name == ".." {
+        return Err(TopicError::InvalidName(format!("« {name} » est interdit")));
+    }
+    if name.len() > MAX_TOPIC_NAME_LEN {
+        return Err(TopicError::InvalidName(format!(
+            "{} caractères, maximum {MAX_TOPIC_NAME_LEN}",
+            name.len()
+        )));
+    }
+    if let Some(c) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))) {
+        return Err(TopicError::InvalidName(format!("caractère interdit {c:?} dans {name:?}")));
+    }
+    Ok(())
 }
