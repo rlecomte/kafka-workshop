@@ -23,11 +23,17 @@
 mod api_versions;
 mod create_topics;
 mod describe_configs;
+mod describe_groups;
 mod fetch;
+mod find_coordinator;
+mod groups;
 mod init_producer_id;
 mod list_offsets;
 mod metadata;
+mod offsets;
 mod produce;
+
+use std::net::SocketAddr;
 
 use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
@@ -38,13 +44,23 @@ use kafka_protocol::protocol::{Encodable, decode_request_header_from_buffer};
 
 use crate::{Broker, apis};
 
+/// Informations sur la requête utiles à certains handlers.
+#[derive(Debug, Clone)]
+pub struct RequestContext {
+    /// Version de l'API utilisée par la requête.
+    pub version: i16,
+    pub client_id: String,
+    /// Adresse du client, telle que l'affiche Kafka (`/127.0.0.1`).
+    pub client_host: String,
+}
+
 impl Broker {
     /// Traite une trame de requête et renvoie le contenu de la trame de réponse,
     /// ou `None` si la requête n'appelle pas de réponse (Produce avec `acks = 0`).
     ///
     /// Renvoyer une erreur provoque la fermeture de la connexion : c'est ce
     /// que fait Kafka quand il reçoit une requête qu'il ne sait pas décoder.
-    pub async fn handle_request(&self, mut frame: Bytes) -> Result<Option<Bytes>> {
+    pub async fn handle_request(&self, mut frame: Bytes, peer: SocketAddr) -> Result<Option<Bytes>> {
         let header = decode_request_header_from_buffer(&mut frame)
             .context("request header illisible")?;
         let api_key = ApiKey::try_from(header.request_api_key)
@@ -65,6 +81,11 @@ impl Broker {
             bail!("API non supportée : {api_key:?} v{version}");
         }
 
+        let ctx = RequestContext {
+            version,
+            client_id: header.client_id.as_deref().unwrap_or_default().to_string(),
+            client_host: format!("/{}", peer.ip()),
+        };
         let request = RequestKind::decode(api_key, &mut frame, version)
             .with_context(|| format!("corps de requête {api_key:?} v{version} illisible"))?;
 
@@ -80,6 +101,15 @@ impl Broker {
             RequestKind::InitProducerId(req) => ResponseKind::InitProducerId(self.handle_init_producer_id(req)),
             RequestKind::Fetch(req) => ResponseKind::Fetch(self.handle_fetch(req).await),
             RequestKind::ListOffsets(req) => ResponseKind::ListOffsets(self.handle_list_offsets(req)),
+            RequestKind::FindCoordinator(req) => ResponseKind::FindCoordinator(self.handle_find_coordinator(req, &ctx)),
+            RequestKind::JoinGroup(req) => ResponseKind::JoinGroup(self.handle_join_group(req, &ctx).await),
+            RequestKind::SyncGroup(req) => ResponseKind::SyncGroup(self.handle_sync_group(req).await),
+            RequestKind::Heartbeat(req) => ResponseKind::Heartbeat(self.handle_heartbeat(req)),
+            RequestKind::LeaveGroup(req) => ResponseKind::LeaveGroup(self.handle_leave_group(req, &ctx)),
+            RequestKind::OffsetCommit(req) => ResponseKind::OffsetCommit(self.handle_offset_commit(req).await),
+            RequestKind::OffsetFetch(req) => ResponseKind::OffsetFetch(self.handle_offset_fetch(req, &ctx)),
+            RequestKind::ListGroups(req) => ResponseKind::ListGroups(self.handle_list_groups(req)),
+            RequestKind::DescribeGroups(req) => ResponseKind::DescribeGroups(self.handle_describe_groups(req)),
             other => bail!("pas de handler pour {other:?}"),
         };
 

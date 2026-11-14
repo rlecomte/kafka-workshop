@@ -48,6 +48,14 @@ async fn main() -> anyhow::Result<()> {
             "BROKER_RETENTION_CHECK_INTERVAL_MS",
             defaults.retention_check_interval.as_millis() as u64,
         )?),
+        group: broker::groups::group::GroupConfig {
+            initial_rebalance_delay: std::time::Duration::from_millis(env_or(
+                "BROKER_GROUP_INITIAL_REBALANCE_DELAY_MS",
+                defaults.group.initial_rebalance_delay.as_millis() as u64,
+            )?),
+            ..defaults.group
+        },
+        offsets_topic_partitions: env_or("BROKER_OFFSETS_TOPIC_PARTITIONS", defaults.offsets_topic_partitions)?,
     };
 
     let listener = TcpListener::bind(("0.0.0.0", config.port))

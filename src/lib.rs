@@ -7,9 +7,15 @@
 //! - [`topics`] : le registre des topics et de leurs partitions ;
 //! - [`record_batch`] : le format binaire des batches de messages ;
 //! - [`log`] : le stockage sur disque d'une partition ;
-//! - [`replica`] : les partitions hébergées par ce broker et leurs logs.
+//! - [`replica`] : les partitions hébergées par ce broker et leurs logs ;
+//! - [`groups`] : le coordinateur des consumer groups et leurs offsets.
+
+// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
+// certains imports, paramètres et fonctions ne servent pas encore.
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 
 pub mod apis;
+pub mod groups;
 pub mod handlers;
 pub mod log;
 pub mod record_batch;
@@ -52,6 +58,11 @@ pub struct Config {
     /// Fréquence de vérification de la rétention
     /// (`log.retention.check.interval.ms` dans Kafka).
     pub retention_check_interval: Duration,
+    /// Paramètres des consumer groups.
+    pub group: groups::group::GroupConfig,
+    /// Nombre de partitions de `__consumer_offsets`
+    /// (`offsets.topic.num.partitions`, 50 dans Kafka).
+    pub offsets_topic_partitions: i32,
 }
 
 impl Default for Config {
@@ -67,6 +78,8 @@ impl Default for Config {
             max_message_bytes: 1024 * 1024,
             log: log::LogConfig::default(),
             retention_check_interval: Duration::from_secs(300),
+            group: groups::group::GroupConfig::default(),
+            offsets_topic_partitions: 10,
         }
     }
 }
@@ -83,6 +96,7 @@ pub struct Broker {
     pub next_producer_id: AtomicI64,
     /// Annulé à l'arrêt du broker : toutes les tâches de fond s'arrêtent.
     pub shutdown: CancellationToken,
+    pub groups: groups::GroupCoordinator,
 }
 
 impl Broker {
@@ -95,13 +109,26 @@ impl Broker {
             tracing::info!(topic = %topic.name, partitions = topic.partitions.len(), "topic rechargé");
             topics.restore(topic);
         }
-        Ok(Self {
+        let broker = Self {
+            groups: groups::GroupCoordinator::new(config.group.clone()),
             config,
             topics,
             replicas,
             next_producer_id: AtomicI64::new(0),
             shutdown: CancellationToken::new(),
-        })
+        };
+        broker.load_offsets()?;
+        Ok(broker)
+    }
+
+    /// Relit `__consumer_offsets` pour retrouver les offsets commités.
+    fn load_offsets(&self) -> std::io::Result<()> {
+        todo!("ch.5 : load_offsets")
+    }
+
+    /// Crée `__consumer_offsets` s'il n'existe pas encore.
+    pub fn ensure_offsets_topic(&self) -> Result<Arc<Topic>, TopicError> {
+        todo!("ch.5 : ensure_offsets_topic")
     }
 
     /// Lance une tâche de fond, arrêtée automatiquement à l'arrêt du broker.
@@ -123,6 +150,15 @@ impl Broker {
             loop {
                 interval.tick().await;
                 broker.replicas.apply_retention();
+            }
+        });
+
+        let broker = self.clone();
+        self.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                broker.groups.tick();
             }
         });
     }

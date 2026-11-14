@@ -5,6 +5,8 @@
 //! pour encoder les requêtes et décoder les réponses.
 #![allow(dead_code)]
 
+pub mod groups;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

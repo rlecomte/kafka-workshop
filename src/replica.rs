@@ -78,6 +78,11 @@ impl Replica {
         self.log.lock().unwrap().offset_for_timestamp(timestamp)
     }
 
+    /// Lit tout le log (jusqu'au high watermark).
+    pub fn read_all(&self) -> io::Result<Bytes> {
+        todo!("ch.5 : read_all")
+    }
+
     pub fn apply_retention(&self, now_ms: i64) -> io::Result<usize> {
         self.log.lock().unwrap().apply_retention(now_ms)
     }
@@ -118,7 +123,14 @@ impl ReplicaManager {
     /// `partition.metadata` du répertoire mémorise l'identifiant du topic.
     pub fn open_replica(&self, topic: &str, topic_id: Uuid, partition: i32) -> io::Result<Arc<Replica>> {
         let dir = self.data_dir.join(format!("{topic}-{partition}"));
-        let log = Log::open(&dir, self.log_config.clone())?;
+        let mut config = self.log_config.clone();
+        if topic.starts_with("__") {
+            // Les topics internes (__consumer_offsets) ne doivent pas perdre
+            // de données avec le temps. Kafka les compacte au lieu de les purger.
+            config.retention_ms = None;
+            config.retention_bytes = None;
+        }
+        let log = Log::open(&dir, config)?;
         std::fs::write(dir.join(PARTITION_METADATA), format!("version: 0\ntopic_id: {topic_id}\n"))?;
         let replica = Arc::new(Replica {
             topic: topic.to_string(),

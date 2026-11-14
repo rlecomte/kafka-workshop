@@ -26,6 +26,7 @@ pub const SUPPORTED_APIS: &[SupportedApi] = &[
     // ch.3
     SupportedApi { key: ApiKey::Fetch, min_version: 4, max_version: 12 },
     SupportedApi { key: ApiKey::ListOffsets, min_version: 1, max_version: 7 },
+    // ch.5 : à compléter
 ];
 
 /// Renvoie la plage supportée pour `key`, ou `None` si l'API n'est pas implémentée.

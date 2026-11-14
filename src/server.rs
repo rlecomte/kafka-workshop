@@ -10,6 +10,7 @@
 //! +----------------+---------------------------------+
 //! ```
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -39,7 +40,7 @@ pub async fn serve(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
             _ = broker.shutdown.cancelled() => return Ok(()),
         };
         tracing::debug!(%peer, "nouvelle connexion");
-        let connection = handle_connection(socket, broker.clone());
+        let connection = handle_connection(socket, peer, broker.clone());
         broker.spawn(async move {
             match connection.await {
                 Ok(()) => tracing::debug!(%peer, "connexion fermée par le client"),
@@ -61,10 +62,10 @@ fn is_disconnect(e: &anyhow::Error) -> bool {
 ///
 /// Les réponses doivent partir dans l'ordre des requêtes : c'est ce qui
 /// permet aux clients d'envoyer plusieurs requêtes d'affilée (pipelining).
-async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
+async fn handle_connection(mut socket: TcpStream, peer: SocketAddr, broker: Arc<Broker>) -> Result<()> {
     socket.set_nodelay(true)?;
     while let Some(frame) = read_frame(&mut socket).await? {
-        if let Some(response) = broker.handle_request(frame).await? {
+        if let Some(response) = broker.handle_request(frame, peer).await? {
             write_frame(&mut socket, &response).await?;
         }
     }
