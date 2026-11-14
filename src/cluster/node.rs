@@ -71,7 +71,39 @@ impl ClusterNode {
 /// - Si une partition hors ligne voit revenir une réplique de l'ISR, celle-ci
 ///   devient leader.
 pub fn elect(record: &PartitionRecord, replicas: &[i32], state: &ClusterState, unclean: bool) -> Option<PartitionRecord> {
-    todo!("ch.8 : elect")
+    let alive = |r: &i32| state.is_alive(*r);
+    let leader_alive = record.leader >= 0 && alive(&record.leader);
+
+    let mut isr: Vec<i32> = record.isr.iter().copied().filter(alive).collect();
+    if leader_alive {
+        if isr.len() == record.isr.len() {
+            return None;
+        }
+        return Some(PartitionRecord { isr, ..record.clone() });
+    }
+
+    let leader = match isr.first() {
+        Some(&leader) => leader,
+        None if unclean => match replicas.iter().copied().find(alive) {
+            // Élection impure : une réplique hors de l'ISR, potentiellement en
+            // retard, devient leader. Des messages confirmés peuvent être perdus.
+            Some(leader) => {
+                isr = vec![leader];
+                leader
+            }
+            None => -1,
+        },
+        None => -1,
+    };
+    if leader < 0 {
+        // Personne pour reprendre : la partition est hors ligne. On garde la
+        // dernière ISR connue, pour savoir qui pourra reprendre.
+        if record.leader == -1 {
+            return None;
+        }
+        return Some(PartitionRecord { leader: -1, leader_epoch: record.leader_epoch + 1, isr: record.isr.clone() });
+    }
+    Some(PartitionRecord { leader, leader_epoch: record.leader_epoch + 1, isr })
 }
 
 impl Broker {
@@ -203,7 +235,23 @@ impl Broker {
     /// Appelée à chaque changement de l'état du cluster (et au moins une fois
     /// par seconde) tant que ce broker est controller.
     async fn reconcile_partitions(&self) {
-        todo!("ch.8 : reconcile_partitions")
+        let node = self.cluster().unwrap();
+        let state = node.state();
+        for ((topic, partition), (record, revision)) in &state.partitions {
+            let Some(replicas) = state.topics.get(topic).and_then(|t| t.partitions.get(*partition as usize)) else { continue };
+            let Some(new) = elect(record, replicas, &state, self.config.unclean_leader_election) else { continue };
+
+            let key = node.keys.partition(topic, *partition);
+            let value = serde_json::to_vec(&new).unwrap();
+            match node.etcd.txn(&[Compare::ModRevision(key.clone(), *revision)], &[Op::Put { key, value, lease: None }], &[]).await {
+                Ok(true) if new.leader != record.leader => {
+                    tracing::info!(%topic, partition, old = record.leader, new = new.leader, epoch = new.leader_epoch, isr = ?new.isr, "nouveau leader élu")
+                }
+                Ok(true) => tracing::info!(%topic, partition, isr = ?new.isr, "brokers morts retirés de l'ISR"),
+                Ok(false) => {} // modifiée entre-temps : on réessaiera au prochain changement
+                Err(e) => tracing::warn!(%topic, partition, "mise à jour de la partition impossible : {e:#}"),
+            }
+        }
     }
 
     /// Ce broker est-il le controller ?

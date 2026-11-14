@@ -124,7 +124,18 @@ impl Replica {
     /// Sauvegarde le high watermark sur disque s'il a changé depuis la
     /// dernière sauvegarde (`replication-offset-checkpoint` dans Kafka).
     pub fn checkpoint_high_watermark(&self) -> io::Result<()> {
-        todo!("ch.8 : checkpoint_high_watermark")
+        let (high_watermark, changed) = {
+            let state = self.state.lock().unwrap();
+            (state.high_watermark, state.high_watermark != state.checkpointed_high_watermark)
+        };
+        if changed {
+            let dir = self.log.lock().unwrap().dir().to_path_buf();
+            let tmp = dir.join(format!("{HIGH_WATERMARK_FILE}.tmp"));
+            std::fs::write(&tmp, high_watermark.to_string())?;
+            std::fs::rename(&tmp, dir.join(HIGH_WATERMARK_FILE))?;
+            self.state.lock().unwrap().checkpointed_high_watermark = high_watermark;
+        }
+        Ok(())
     }
 
     /// Écrit des batches en tant que leader : attribue les offsets, puis met
@@ -199,7 +210,42 @@ impl Replica {
     /// Renvoie `true` si la réplique vient de devenir leader, ou follower d'un
     /// nouveau leader (nouvelle epoch).
     pub fn update_partition_state(&self, partition: &Partition) -> bool {
-        todo!("ch.8 : update_partition_state")
+        let is_leader = partition.leader == self.node_id;
+        let changed = {
+            let mut state = self.state.lock().unwrap();
+            let changed = state.is_leader != is_leader || state.leader_epoch != partition.leader_epoch;
+            if changed && is_leader {
+                // Nouveau leader : on ne sait encore rien des followers. On leur
+                // laisse le délai habituel pour se manifester.
+                let now = Instant::now();
+                state.followers = partition
+                    .replicas
+                    .iter()
+                    .filter(|&&r| r != self.node_id)
+                    .map(|&r| (r, FollowerState { log_end_offset: 0, last_caught_up: now }))
+                    .collect();
+            }
+            state.is_leader = is_leader;
+            state.leader_epoch = partition.leader_epoch;
+            state.isr = partition.isr.clone();
+            changed
+        };
+        // Partition hors ligne (leader -1) : on ne touche à rien, cette réplique
+        // pourrait être la seule à avoir les données.
+        if changed && !is_leader && partition.leader >= 0 {
+            // Nouveau follower : les messages après le high watermark n'ont
+            // peut-être jamais été répliqués (ancien leader qui revient). On les
+            // supprime ; ceux qui existent chez le leader seront recopiés.
+            let high_watermark = self.high_watermark();
+            if self.log_end_offset() > high_watermark {
+                tracing::info!(topic = %self.topic, partition = self.partition, high_watermark, "troncature au high watermark");
+                if let Err(e) = self.truncate_to(high_watermark) {
+                    tracing::error!(topic = %self.topic, partition = self.partition, "troncature impossible : {e}");
+                }
+            }
+        }
+        self.update_high_watermark();
+        changed
     }
 
     /// Côté leader : enregistre le Fetch d'un follower. Son `fetch_offset`
@@ -296,7 +342,27 @@ impl Replica {
     /// est dans le log d'un leader finira répliqué, même si son high watermark
     /// est encore en retard (il vient de devenir leader).
     pub fn read_all(&self) -> io::Result<Bytes> {
-        todo!("ch.8 : read_all")
+        let mut all = bytes::BytesMut::new();
+        let mut offset = self.log_start_offset();
+        loop {
+            let data = match self.read_for_follower(offset, 1024 * 1024) {
+                Ok(data) => data,
+                Err(ReadError::Io(e)) => return Err(e),
+                Err(ReadError::OffsetOutOfRange { .. }) => break,
+            };
+            if data.records.is_empty() {
+                break;
+            }
+            let mut next = offset;
+            let mut rest = &data.records[..];
+            while let Ok(header) = crate::record_batch::RecordBatchHeader::parse(rest) {
+                next = header.next_offset();
+                rest = &rest[header.total_size()..];
+            }
+            all.extend_from_slice(&data.records);
+            offset = next;
+        }
+        Ok(all.freeze())
     }
 
     pub fn apply_retention(&self, now_ms: i64) -> io::Result<usize> {

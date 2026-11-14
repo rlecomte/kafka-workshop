@@ -11,10 +11,6 @@
 //! - [`groups`] : le coordinateur des consumer groups et leurs offsets ;
 //! - [`cluster`] : le mode cluster, coordonné par etcd.
 
-// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
-// certains imports, paramètres et fonctions ne servent pas encore.
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
-
 pub mod apis;
 pub mod cluster;
 pub mod groups;
