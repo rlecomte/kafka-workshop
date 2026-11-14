@@ -37,6 +37,24 @@ impl Broker {
     }
 
     async fn find_coordinator(&self, key: StrBytes, key_type: i8) -> Coordinator {
-        todo!("ch.6 : find_coordinator")
+        let coordinator = Coordinator::default().with_key(key.clone()).with_node_id(BrokerId(-1)).with_port(-1);
+        if key_type != KEY_TYPE_GROUP {
+            return coordinator
+                .with_error_code(ResponseError::InvalidRequest.code())
+                .with_error_message(Some(StrBytes::from_static_str("les transactions ne sont pas supportées")));
+        }
+        if let Err(e) = self.ensure_offsets_topic().await {
+            tracing::error!("impossible de créer __consumer_offsets : {e}");
+            return coordinator.with_error_code(ResponseError::CoordinatorNotAvailable.code());
+        }
+        // Le coordinateur est le leader de la partition du groupe.
+        let leader = self.coordinator_for(key.as_str()).map_or(-1, |(_, leader)| leader);
+        match self.live_brokers().into_iter().find(|b| b.node_id == leader) {
+            Some(b) => coordinator
+                .with_node_id(BrokerId(b.node_id))
+                .with_host(StrBytes::from_string(b.host))
+                .with_port(b.port as i32),
+            None => coordinator.with_error_code(ResponseError::CoordinatorNotAvailable.code()),
+        }
     }
 }

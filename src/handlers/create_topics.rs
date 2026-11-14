@@ -13,7 +13,21 @@ use crate::topics::NewTopic;
 
 impl Broker {
     pub(super) async fn handle_create_topics(&self, request: CreateTopicsRequest) -> CreateTopicsResponse {
-        todo!("ch.6 : handle_create_topics")
+        let mut topics = Vec::new();
+        for topic in request.topics {
+            // En mode cluster, seul le controller crée les topics : les clients
+            // lui renvoient la requête après avoir rafraîchi leurs métadonnées.
+            if !self.is_controller() {
+                topics.push(
+                    CreatableTopicResult::default()
+                        .with_name(topic.name)
+                        .with_error_code(kafka_protocol::ResponseError::NotController.code()),
+                );
+                continue;
+            }
+            topics.push(self.create_one_topic(topic, request.validate_only).await);
+        }
+        CreateTopicsResponse::default().with_topics(topics)
     }
 
     async fn create_one_topic(&self, topic: CreatableTopic, validate_only: bool) -> CreatableTopicResult {

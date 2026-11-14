@@ -11,10 +11,6 @@
 //! - [`groups`] : le coordinateur des consumer groups et leurs offsets ;
 //! - [`cluster`] : le mode cluster, coordonné par etcd.
 
-// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
-// certains imports, paramètres et fonctions ne servent pas encore.
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
-
 pub mod apis;
 pub mod cluster;
 pub mod groups;
@@ -191,29 +187,54 @@ impl Broker {
 
     /// Les brokers vivants, triés par identifiant.
     pub fn live_brokers(&self) -> Vec<cluster::BrokerRecord> {
-        todo!("ch.6 : live_brokers")
+        match self.cluster() {
+            Some(node) => node.state().brokers.into_values().collect(),
+            None => vec![cluster::BrokerRecord {
+                node_id: self.config.node_id,
+                host: self.config.host.clone(),
+                port: self.config.port,
+            }],
+        }
     }
 
     /// Le controller, ou -1 s'il n'y en a pas.
     pub fn controller_id(&self) -> i32 {
-        todo!("ch.6 : controller_id")
+        match self.cluster() {
+            Some(node) => node.state().controller.unwrap_or(-1),
+            None => self.config.node_id,
+        }
     }
 
     /// La réplique locale d'une partition dont ce broker est le leader.
     pub fn leader_replica(&self, topic: &str, partition: i32) -> Result<Arc<replica::Replica>, kafka_protocol::ResponseError> {
-        todo!("ch.6 : leader_replica")
+        use kafka_protocol::ResponseError;
+        let metadata = self.topics.get(topic).and_then(|t| t.partitions.iter().find(|p| p.index == partition).cloned());
+        let Some(metadata) = metadata else { return Err(ResponseError::UnknownTopicOrPartition) };
+        if metadata.leader != self.config.node_id {
+            return Err(ResponseError::NotLeaderOrFollower);
+        }
+        self.replicas.get(topic, partition).ok_or(ResponseError::NotLeaderOrFollower)
     }
 
     /// Le coordinateur d'un groupe : le leader de sa partition de
     /// `__consumer_offsets`. Renvoie la partition et le leader (-1 si aucun).
     pub fn coordinator_for(&self, group_id: &str) -> Option<(i32, i32)> {
-        todo!("ch.6 : coordinator_for")
+        let topic = self.topics.get(groups::offsets::OFFSETS_TOPIC)?;
+        let partition = groups::offsets::partition_for(group_id, topic.partitions.len() as i32);
+        let leader = topic.partitions.iter().find(|p| p.index == partition).map_or(-1, |p| p.leader);
+        Some((partition, leader))
     }
 
     /// Ce broker est-il le coordinateur de ce groupe (et ses offsets sont-ils
     /// chargés) ? Un broker autonome coordonne tous les groupes.
     pub fn is_coordinator(&self, group_id: &str) -> bool {
-        todo!("ch.6 : is_coordinator")
+        if self.cluster.is_none() {
+            return true;
+        }
+        match self.coordinator_for(group_id) {
+            Some((partition, leader)) => leader == self.config.node_id && self.offsets_loaded(partition),
+            None => false,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -223,12 +244,35 @@ impl Broker {
     /// Crée un topic. En mode autonome : l'enregistre dans le registre, puis
     /// crée les logs de ses partitions. En mode cluster : l'écrit dans etcd.
     pub async fn create_topic(&self, new: NewTopic, validate_only: bool) -> Result<Arc<Topic>, TopicError> {
-        todo!("ch.6 : create_topic")
+        if self.cluster.is_some() {
+            return self.create_topic_in_cluster(new, validate_only).await;
+        }
+        let topic = self.topics.create(new, validate_only)?;
+        if !validate_only {
+            self.replicas.create_replicas(&topic).map_err(|e| {
+                tracing::error!(topic = %topic.name, "impossible de créer les logs : {e}");
+                TopicError::Storage(e.to_string())
+            })?;
+        }
+        Ok(topic)
     }
 
     /// Crée `__consumer_offsets` s'il n'existe pas encore, avec 3 répliques
     /// au plus (`offsets.topic.replication.factor`).
     pub async fn ensure_offsets_topic(&self) -> Result<Arc<Topic>, TopicError> {
-        todo!("ch.6 : ensure_offsets_topic")
+        if let Some(topic) = self.topics.get(groups::offsets::OFFSETS_TOPIC) {
+            return Ok(topic);
+        }
+        let new = NewTopic {
+            name: groups::offsets::OFFSETS_TOPIC.to_string(),
+            num_partitions: self.config.offsets_topic_partitions,
+            replication_factor: self.live_brokers().len().clamp(1, 3) as i16,
+        };
+        match self.create_topic(new, false).await {
+            Err(TopicError::AlreadyExists(_)) => {
+                Ok(self.topics.get(groups::offsets::OFFSETS_TOPIC).expect("créé entre-temps"))
+            }
+            other => other,
+        }
     }
 }

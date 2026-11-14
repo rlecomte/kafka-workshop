@@ -127,7 +127,51 @@ impl ClusterState {
 
     /// Applique un changement observé dans etcd.
     pub fn apply(&mut self, keys: &Keys, event: &WatchEvent) {
-        todo!("ch.6 : apply")
+        let Some(path) = event.kv.key.strip_prefix(&keys.all()) else { return };
+        let parts: Vec<&str> = path.split('/').collect();
+        let put = event.kind == EventKind::Put;
+        let value = &event.kv.value;
+        match parts.as_slice() {
+            ["brokers", id] => {
+                let Ok(id) = id.parse() else { return };
+                match serde_json::from_slice(value) {
+                    Ok(record) if put => {
+                        self.brokers.insert(id, record);
+                    }
+                    _ => {
+                        self.brokers.remove(&id);
+                    }
+                }
+            }
+            ["controller"] => {
+                self.controller = if put {
+                    serde_json::from_slice::<ControllerRecord>(value).ok().map(|c| c.node_id)
+                } else {
+                    None
+                };
+            }
+            ["topics", name] => match serde_json::from_slice(value) {
+                Ok(record) if put => {
+                    self.topics.insert(name.to_string(), record);
+                }
+                _ => {
+                    self.topics.remove(*name);
+                }
+            },
+            ["partitions", topic, partition] => {
+                let Ok(partition) = partition.parse() else { return };
+                let key = (topic.to_string(), partition);
+                match serde_json::from_slice(value) {
+                    Ok(record) if put => {
+                        self.partitions.insert(key, (record, event.kv.mod_revision));
+                    }
+                    _ => {
+                        self.partitions.remove(&key);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn is_alive(&self, node_id: i32) -> bool {
@@ -140,7 +184,10 @@ impl ClusterState {
 /// partition sont sur des brokers différents ; les leaders (première réplique)
 /// sont répartis en tourniquet à partir de `start`.
 pub fn assign_replicas(brokers: &[i32], partitions: i32, replication_factor: usize, start: usize) -> Vec<Vec<i32>> {
-    todo!("ch.6 : assign_replicas")
+    let n = brokers.len();
+    (0..partitions as usize)
+        .map(|p| (0..replication_factor).map(|r| brokers[(start + p + r) % n]).collect())
+        .collect()
 }
 
 #[cfg(test)]
