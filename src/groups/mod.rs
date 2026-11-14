@@ -45,11 +45,20 @@ impl GroupCoordinator {
     /// Applique des commits (relus depuis `__consumer_offsets`, ou qui viennent
     /// d'y être écrits) aux offsets en mémoire.
     pub fn apply_commits(&self, commits: Vec<(OffsetKey, OffsetValue)>) {
-        todo!("ch.5 : apply_commits")
+        let mut groups = self.groups.lock().unwrap();
+        for (key, value) in commits {
+            let group = groups.entry(key.group.clone()).or_insert_with(|| Group::new(&key.group));
+            group.offsets.insert((key.topic, key.partition), (&value).into());
+        }
     }
 
     /// Gère les échéances de tous les groupes, et oublie les groupes morts.
     pub fn tick(&self) {
-        todo!("ch.5 : tick")
+        let now = Instant::now();
+        let mut groups = self.groups.lock().unwrap();
+        for group in groups.values_mut() {
+            group.tick(&self.config, now);
+        }
+        groups.retain(|_, g| !g.is_dead());
     }
 }

@@ -43,7 +43,11 @@ impl From<&OffsetValue> for CommittedOffset {
 /// comme Kafka, `abs(hashCode(group_id)) % partitions`, avec le `hashCode`
 /// des chaînes Java.
 pub fn partition_for(group_id: &str, partitions: i32) -> i32 {
-    todo!("ch.5 : partition_for")
+    let mut hash: i32 = 0;
+    for unit in group_id.encode_utf16() {
+        hash = hash.wrapping_mul(31).wrapping_add(unit as i32);
+    }
+    (hash & 0x7fff_ffff) % partitions
 }
 
 /// Encode des commits en un batch (un record par partition commitée).

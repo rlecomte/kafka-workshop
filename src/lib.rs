@@ -10,10 +10,6 @@
 //! - [`replica`] : les partitions hébergées par ce broker et leurs logs ;
 //! - [`groups`] : le coordinateur des consumer groups et leurs offsets.
 
-// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
-// certains imports, paramètres et fonctions ne servent pas encore.
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
-
 pub mod apis;
 pub mod groups;
 pub mod handlers;
@@ -123,12 +119,33 @@ impl Broker {
 
     /// Relit `__consumer_offsets` pour retrouver les offsets commités.
     fn load_offsets(&self) -> std::io::Result<()> {
-        todo!("ch.5 : load_offsets")
+        let Some(topic) = self.topics.get(groups::offsets::OFFSETS_TOPIC) else { return Ok(()) };
+        for partition in &topic.partitions {
+            if let Some(replica) = self.replicas.get(&topic.name, partition.index) {
+                let commits = groups::offsets::decode_commits(replica.read_all()?);
+                tracing::info!(partition = partition.index, commits = commits.len(), "offsets rechargés");
+                self.groups.apply_commits(commits);
+            }
+        }
+        Ok(())
     }
 
     /// Crée `__consumer_offsets` s'il n'existe pas encore.
     pub fn ensure_offsets_topic(&self) -> Result<Arc<Topic>, TopicError> {
-        todo!("ch.5 : ensure_offsets_topic")
+        if let Some(topic) = self.topics.get(groups::offsets::OFFSETS_TOPIC) {
+            return Ok(topic);
+        }
+        let new = NewTopic {
+            name: groups::offsets::OFFSETS_TOPIC.to_string(),
+            num_partitions: self.config.offsets_topic_partitions,
+            replication_factor: 1,
+        };
+        match self.create_topic(new, false) {
+            Err(TopicError::AlreadyExists(_)) => {
+                Ok(self.topics.get(groups::offsets::OFFSETS_TOPIC).expect("créé entre-temps"))
+            }
+            other => other,
+        }
     }
 
     /// Lance une tâche de fond, arrêtée automatiquement à l'arrêt du broker.

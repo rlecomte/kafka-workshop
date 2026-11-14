@@ -80,7 +80,27 @@ impl Replica {
 
     /// Lit tout le log (jusqu'au high watermark).
     pub fn read_all(&self) -> io::Result<Bytes> {
-        todo!("ch.5 : read_all")
+        let mut all = bytes::BytesMut::new();
+        let mut offset = self.log_start_offset();
+        loop {
+            let data = match self.read(offset, 1024 * 1024) {
+                Ok(data) => data,
+                Err(ReadError::Io(e)) => return Err(e),
+                Err(ReadError::OffsetOutOfRange { .. }) => break,
+            };
+            if data.records.is_empty() {
+                break;
+            }
+            let mut next = offset;
+            let mut rest = &data.records[..];
+            while let Ok(header) = crate::record_batch::RecordBatchHeader::parse(rest) {
+                next = header.next_offset();
+                rest = &rest[header.total_size()..];
+            }
+            all.extend_from_slice(&data.records);
+            offset = next;
+        }
+        Ok(all.freeze())
     }
 
     pub fn apply_retention(&self, now_ms: i64) -> io::Result<usize> {

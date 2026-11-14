@@ -26,7 +26,16 @@ pub const SUPPORTED_APIS: &[SupportedApi] = &[
     // ch.3
     SupportedApi { key: ApiKey::Fetch, min_version: 4, max_version: 12 },
     SupportedApi { key: ApiKey::ListOffsets, min_version: 1, max_version: 7 },
-    // ch.5 : à compléter
+    // ch.5
+    SupportedApi { key: ApiKey::FindCoordinator, min_version: 0, max_version: 4 },
+    SupportedApi { key: ApiKey::JoinGroup, min_version: 0, max_version: 9 },
+    SupportedApi { key: ApiKey::SyncGroup, min_version: 0, max_version: 5 },
+    SupportedApi { key: ApiKey::Heartbeat, min_version: 0, max_version: 4 },
+    SupportedApi { key: ApiKey::LeaveGroup, min_version: 0, max_version: 5 },
+    SupportedApi { key: ApiKey::OffsetCommit, min_version: 2, max_version: 9 },
+    SupportedApi { key: ApiKey::OffsetFetch, min_version: 1, max_version: 9 },
+    SupportedApi { key: ApiKey::ListGroups, min_version: 0, max_version: 5 },
+    SupportedApi { key: ApiKey::DescribeGroups, min_version: 0, max_version: 5 },
 ];
 
 /// Renvoie la plage supportée pour `key`, ou `None` si l'API n'est pas implémentée.

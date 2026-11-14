@@ -205,7 +205,58 @@ impl Group {
     // -----------------------------------------------------------------------
 
     pub fn join(&mut self, request: JoinRequest, config: &GroupConfig, now: Instant) -> Outcome<JoinResult> {
-        todo!("ch.5 : join")
+        let member_id = request.member_id.clone();
+        if request.session_timeout < config.min_session_timeout || request.session_timeout > config.max_session_timeout {
+            return Outcome::Now(JoinResult::error(ResponseError::InvalidSessionTimeout, &member_id));
+        }
+        if !self.is_compatible(&request) {
+            return Outcome::Now(JoinResult::error(ResponseError::InconsistentGroupProtocol, &member_id));
+        }
+
+        let member_id = if member_id.is_empty() {
+            let id = format!("{}-{}", request.client_id, uuid::Uuid::new_v4());
+            if request.require_known_member_id {
+                // Le client doit renvoyer un JoinGroup avec cet identifiant.
+                self.pending_members.insert(id.clone(), now + request.session_timeout);
+                return Outcome::Now(JoinResult::error(ResponseError::MemberIdRequired, &id));
+            }
+            id
+        } else {
+            if !self.members.contains_key(&member_id) && self.pending_members.remove(&member_id).is_none() {
+                return Outcome::Now(JoinResult::error(ResponseError::UnknownMemberId, &member_id));
+            }
+            member_id
+        };
+
+        let (sender, receiver) = oneshot::channel();
+        let member = self.members.entry(member_id.clone()).or_insert_with(|| Member {
+            id: member_id.clone(),
+            client_id: request.client_id.clone(),
+            client_host: request.client_host.clone(),
+            session_timeout: request.session_timeout,
+            rebalance_timeout: request.rebalance_timeout,
+            protocols: Vec::new(),
+            assignment: Bytes::new(),
+            last_seen: now,
+            join_waiter: None,
+            sync_waiter: None,
+        });
+        member.session_timeout = request.session_timeout;
+        member.rebalance_timeout = request.rebalance_timeout;
+        member.protocols = request.protocols;
+        member.last_seen = now;
+        if let Some(previous) = member.join_waiter.replace(sender) {
+            let _ = previous.send(JoinResult::error(ResponseError::RebalanceInProgress, &member_id));
+        }
+        if self.protocol_type.is_none() {
+            self.protocol_type = Some(request.protocol_type);
+        }
+
+        if self.state != GroupState::PreparingRebalance {
+            self.prepare_rebalance(config, now);
+        }
+        self.maybe_complete_join(now);
+        Outcome::Later(receiver)
     }
 
     /// Le protocole d'un nouveau membre doit être compatible avec le groupe :
@@ -240,25 +291,103 @@ impl Group {
     /// Démarre un rebalance : on attend que tous les membres renvoient un
     /// JoinGroup. Les SyncGroup en attente sont annulés.
     fn prepare_rebalance(&mut self, config: &GroupConfig, now: Instant) {
-        todo!("ch.5 : prepare_rebalance")
+        for member in self.members.values_mut() {
+            if let Some(waiter) = member.sync_waiter.take() {
+                let _ = waiter.send(SyncResult::error(ResponseError::RebalanceInProgress));
+            }
+        }
+        if self.state == GroupState::Empty {
+            self.initial_rebalance = true;
+            self.rebalance_deadline = Some(now + config.initial_rebalance_delay);
+        } else {
+            self.initial_rebalance = false;
+            let timeout = self.members.values().map(|m| m.rebalance_timeout).max().unwrap_or_default();
+            self.rebalance_deadline = Some(now + timeout);
+        }
+        tracing::info!(group = %self.id, from = self.state.name(), "début du rebalance");
+        self.state = GroupState::PreparingRebalance;
     }
 
     /// Termine la phase de join si tous les membres ont rejoint.
     fn maybe_complete_join(&mut self, now: Instant) {
-        todo!("ch.5 : maybe_complete_join")
+        if self.state != GroupState::PreparingRebalance {
+            return;
+        }
+        let all_joined = self.members.values().all(|m| m.join_waiter.is_some());
+        let delay_over = !self.initial_rebalance || self.rebalance_deadline.is_none_or(|d| now >= d);
+        if all_joined && delay_over {
+            self.complete_join(now);
+        }
     }
 
     /// Fin de la phase de join : les membres qui n'ont pas rejoint sont
     /// exclus, une nouvelle génération commence, et chaque membre reçoit sa
     /// réponse JoinGroup.
     fn complete_join(&mut self, now: Instant) {
-        todo!("ch.5 : complete_join")
+        let excluded: Vec<String> =
+            self.members.values().filter(|m| m.join_waiter.is_none()).map(|m| m.id.clone()).collect();
+        for id in excluded {
+            tracing::info!(group = %self.id, member = %id, "membre exclu (n'a pas rejoint à temps)");
+            self.members.remove(&id);
+        }
+        self.rebalance_deadline = None;
+        self.initial_rebalance = false;
+        self.generation_id += 1;
+
+        if self.members.is_empty() {
+            self.state = GroupState::Empty;
+            self.protocol_name = None;
+            self.leader = None;
+            return;
+        }
+
+        self.protocol_name = Some(self.select_protocol());
+        if self.leader.as_ref().is_none_or(|l| !self.members.contains_key(l)) {
+            self.leader = self.members.keys().next().cloned();
+        }
+        self.state = GroupState::CompletingRebalance;
+        let protocol = self.protocol_name.clone().unwrap();
+        let leader = self.leader.clone().unwrap();
+        tracing::info!(
+            group = %self.id, generation = self.generation_id, %protocol, %leader,
+            members = self.members.len(), "nouvelle génération"
+        );
+
+        let all_members: Vec<(String, Bytes)> =
+            self.members.values().map(|m| (m.id.clone(), m.metadata(&protocol))).collect();
+        for member in self.members.values_mut() {
+            member.assignment = Bytes::new();
+            member.last_seen = now;
+            let result = JoinResult {
+                error: None,
+                generation_id: self.generation_id,
+                protocol_type: self.protocol_type.clone(),
+                protocol_name: Some(protocol.clone()),
+                leader: leader.clone(),
+                member_id: member.id.clone(),
+                members: if member.id == leader { all_members.clone() } else { Vec::new() },
+            };
+            if let Some(waiter) = member.join_waiter.take() {
+                let _ = waiter.send(result);
+            }
+        }
     }
 
     /// Chaque membre vote pour sa stratégie préférée parmi celles supportées
     /// par tous ; la plus populaire l'emporte.
     fn select_protocol(&self) -> String {
-        todo!("ch.5 : select_protocol")
+        let candidates = self.candidate_protocols(None);
+        let mut votes: Vec<(String, usize)> = candidates.iter().map(|c| (c.clone(), 0)).collect();
+        for member in self.members.values() {
+            if let Some((name, _)) = member.protocols.iter().find(|(n, _)| candidates.contains(n))
+                && let Some(vote) = votes.iter_mut().find(|(c, _)| c == name)
+            {
+                vote.1 += 1;
+            }
+        }
+        // max_by_key renvoie le dernier en cas d'égalité : on parcourt à l'envers
+        // pour garder le premier candidat.
+        votes.into_iter().rev().max_by_key(|(_, n)| *n).map(|(c, _)| c).unwrap_or_default()
     }
 
     // -----------------------------------------------------------------------
@@ -272,7 +401,40 @@ impl Group {
         assignments: Vec<(String, Bytes)>,
         now: Instant,
     ) -> Outcome<SyncResult> {
-        todo!("ch.5 : sync")
+        if let Err(e) = self.check_member(member_id, generation_id) {
+            return Outcome::Now(SyncResult::error(e));
+        }
+        let member = self.members.get_mut(member_id).unwrap();
+        member.last_seen = now;
+
+        match self.state {
+            GroupState::PreparingRebalance => Outcome::Now(SyncResult::error(ResponseError::RebalanceInProgress)),
+            GroupState::Stable => Outcome::Now(self.sync_result(member_id)),
+            GroupState::CompletingRebalance => {
+                let (sender, receiver) = oneshot::channel();
+                member.sync_waiter = Some(sender);
+                if self.leader.as_deref() == Some(member_id) {
+                    // Le leader apporte l'assignation : le groupe devient stable.
+                    let mut assignments: HashMap<String, Bytes> = assignments.into_iter().collect();
+                    for member in self.members.values_mut() {
+                        member.assignment = assignments.remove(&member.id).unwrap_or_default();
+                    }
+                    self.state = GroupState::Stable;
+                    tracing::info!(group = %self.id, generation = self.generation_id, "groupe stable");
+                    let ids: Vec<String> = self.members.keys().cloned().collect();
+                    for id in ids {
+                        let result = self.sync_result(&id);
+                        let member = self.members.get_mut(&id).unwrap();
+                        member.last_seen = now;
+                        if let Some(waiter) = member.sync_waiter.take() {
+                            let _ = waiter.send(result);
+                        }
+                    }
+                }
+                Outcome::Later(receiver)
+            }
+            GroupState::Empty => Outcome::Now(SyncResult::error(ResponseError::UnknownMemberId)),
+        }
     }
 
     fn sync_result(&self, member_id: &str) -> SyncResult {
@@ -300,17 +462,55 @@ impl Group {
     }
 
     pub fn heartbeat(&mut self, member_id: &str, generation_id: i32, now: Instant) -> Result<(), ResponseError> {
-        todo!("ch.5 : heartbeat")
+        self.check_member(member_id, generation_id)?;
+        self.members.get_mut(member_id).unwrap().last_seen = now;
+        match self.state {
+            // Le membre doit renvoyer un JoinGroup.
+            GroupState::PreparingRebalance => Err(ResponseError::RebalanceInProgress),
+            _ => Ok(()),
+        }
     }
 
     pub fn leave(&mut self, member_id: &str, config: &GroupConfig, now: Instant) -> Result<(), ResponseError> {
-        todo!("ch.5 : leave")
+        if self.members.contains_key(member_id) {
+            tracing::info!(group = %self.id, member = %member_id, "membre parti");
+            self.remove_member(member_id, config, now);
+            Ok(())
+        } else {
+            Err(ResponseError::UnknownMemberId)
+        }
     }
 
     /// Retire un membre. S'il en reste d'autres, ils doivent se répartir ses
     /// partitions : nouveau rebalance.
     fn remove_member(&mut self, member_id: &str, config: &GroupConfig, now: Instant) {
-        todo!("ch.5 : remove_member")
+        if let Some(member) = self.members.remove(member_id) {
+            if let Some(waiter) = member.join_waiter {
+                let _ = waiter.send(JoinResult::error(ResponseError::UnknownMemberId, member_id));
+            }
+            if let Some(waiter) = member.sync_waiter {
+                let _ = waiter.send(SyncResult::error(ResponseError::UnknownMemberId));
+            }
+        }
+        match self.state {
+            GroupState::Stable | GroupState::CompletingRebalance => {
+                if self.members.is_empty() {
+                    self.state = GroupState::Empty;
+                    self.leader = None;
+                    self.protocol_name = None;
+                } else {
+                    self.prepare_rebalance(config, now);
+                }
+            }
+            GroupState::PreparingRebalance => {
+                if self.members.is_empty() {
+                    self.complete_join(now);
+                } else {
+                    self.maybe_complete_join(now);
+                }
+            }
+            GroupState::Empty => {}
+        }
     }
 
     /// Vérifie qu'un commit d'offsets est autorisé.
@@ -319,7 +519,15 @@ impl Group {
     /// le groupe n'a pas de membre : c'est le cas des consumers sans group
     /// management (`assign()`) et des outils d'administration.
     pub fn check_commit(&mut self, member_id: &str, generation_id: i32, now: Instant) -> Result<(), ResponseError> {
-        todo!("ch.5 : check_commit")
+        if generation_id < 0 && member_id.is_empty() && self.members.is_empty() {
+            return Ok(());
+        }
+        self.check_member(member_id, generation_id)?;
+        if self.state == GroupState::CompletingRebalance {
+            return Err(ResponseError::RebalanceInProgress);
+        }
+        self.members.get_mut(member_id).unwrap().last_seen = now;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -329,6 +537,24 @@ impl Group {
     /// Appelée régulièrement : fin du délai de rebalance, expiration des
     /// sessions et des identifiants en attente.
     pub fn tick(&mut self, config: &GroupConfig, now: Instant) {
-        todo!("ch.5 : tick")
+        self.pending_members.retain(|_, expires| *expires > now);
+
+        if self.state == GroupState::PreparingRebalance && self.rebalance_deadline.is_some_and(|d| now >= d) {
+            self.complete_join(now);
+        }
+
+        // Un membre qui attend une réponse (JoinGroup, SyncGroup) ne peut pas
+        // envoyer de heartbeat : on ne l'expire pas.
+        let expired: Vec<String> = self
+            .members
+            .values()
+            .filter(|m| m.join_waiter.is_none() && m.sync_waiter.is_none())
+            .filter(|m| now.duration_since(m.last_seen) > m.session_timeout)
+            .map(|m| m.id.clone())
+            .collect();
+        for id in expired {
+            tracing::info!(group = %self.id, member = %id, "session expirée");
+            self.remove_member(&id, config, now);
+        }
     }
 }
