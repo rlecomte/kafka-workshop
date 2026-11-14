@@ -24,14 +24,24 @@ use crate::Broker;
 /// plutôt que d'allouer n'importe quoi.
 pub const MAX_FRAME_SIZE: usize = 100 * 1024 * 1024;
 
-/// Accepte les connexions en boucle et traite chacune dans sa propre tâche tokio.
+/// Démarre les tâches de fond du broker, puis accepte les connexions en
+/// boucle et traite chacune dans sa propre tâche tokio.
+///
+/// Quand cette fonction se termine (ou que la tâche qui l'exécute est
+/// annulée), le broker s'arrête : son `shutdown` est annulé, ce qui arrête
+/// les tâches de fond et ferme les connexions.
 pub async fn serve(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
+    let _shutdown_on_exit = broker.shutdown.clone().drop_guard();
+    broker.start_background_tasks();
     loop {
-        let (socket, peer) = listener.accept().await?;
+        let (socket, peer) = tokio::select! {
+            accepted = listener.accept() => accepted?,
+            _ = broker.shutdown.cancelled() => return Ok(()),
+        };
         tracing::debug!(%peer, "nouvelle connexion");
-        let broker = broker.clone();
-        tokio::spawn(async move {
-            match handle_connection(socket, broker).await {
+        let connection = handle_connection(socket, broker.clone());
+        broker.spawn(async move {
+            match connection.await {
                 Ok(()) => tracing::debug!(%peer, "connexion fermée par le client"),
                 Err(e) if is_disconnect(&e) => tracing::debug!(%peer, "client déconnecté : {e}"),
                 Err(e) => tracing::warn!(%peer, "connexion fermée : {e:#}"),

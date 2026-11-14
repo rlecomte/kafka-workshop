@@ -26,7 +26,26 @@ pub struct TestBroker {
     pub addr: SocketAddr,
     /// Le répertoire de données, supprimé à la fin du test.
     pub data_dir: Arc<tempfile::TempDir>,
+    pub config: Config,
     task: JoinHandle<Result<()>>,
+}
+
+impl TestBroker {
+    /// Arrête le broker, puis en relance un sur le même répertoire de données.
+    pub async fn restart(self) -> TestBroker {
+        let config = self.config.clone();
+        let data_dir = self.data_dir.clone();
+        self.stop().await;
+        start_broker_in(config, data_dir).await
+    }
+
+    /// Arrête le broker (les données restent sur disque).
+    pub async fn stop(mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+        // Laisse aux tâches annulées le temps de se terminer.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 impl Drop for TestBroker {
@@ -58,8 +77,9 @@ pub async fn start_broker_in(config: Config, data_dir: Arc<tempfile::TempDir>) -
     let addr = listener.local_addr().unwrap();
     let config =
         Config { host: "127.0.0.1".into(), port: addr.port(), data_dir: data_dir.path().to_path_buf(), ..config };
-    let task = tokio::spawn(broker::server::serve(listener, Arc::new(Broker::new(config))));
-    TestBroker { addr, data_dir, task }
+    let broker = Broker::new(config.clone()).expect("démarrage du broker impossible");
+    let task = tokio::spawn(broker::server::serve(listener, Arc::new(broker)));
+    TestBroker { addr, data_dir, config, task }
 }
 
 /// Un client Kafka minimal, une connexion TCP.

@@ -9,6 +9,7 @@ bytes = "1.12.1"
 crc32c = "0.6"
 kafka-protocol = { version = "0.18", features = ["messages_enums"] }
 tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = "0.7"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }

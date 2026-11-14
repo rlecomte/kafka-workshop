@@ -9,6 +9,10 @@
 //! - [`log`] : le stockage sur disque d'une partition ;
 //! - [`replica`] : les partitions hébergées par ce broker et leurs logs.
 
+// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
+// certains imports, paramètres et fonctions ne servent pas encore.
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 pub mod apis;
 pub mod handlers;
 pub mod log;
@@ -17,10 +21,13 @@ pub mod replica;
 pub mod server;
 pub mod topics;
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
+use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
 use topics::{NewTopic, Topic, TopicError};
 
 /// Configuration statique d'un broker.
@@ -44,6 +51,11 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Taille maximale d'un batch (`message.max.bytes` dans Kafka).
     pub max_message_bytes: usize,
+    /// Paramètres des logs : segments, index, rétention.
+    pub log: log::LogConfig,
+    /// Fréquence de vérification de la rétention
+    /// (`log.retention.check.interval.ms` dans Kafka).
+    pub retention_check_interval: Duration,
 }
 
 impl Default for Config {
@@ -57,6 +69,8 @@ impl Default for Config {
             auto_create_topics: true,
             data_dir: PathBuf::from("data"),
             max_message_bytes: 1024 * 1024,
+            log: log::LogConfig::default(),
+            retention_check_interval: Duration::from_secs(300),
         }
     }
 }
@@ -71,12 +85,38 @@ pub struct Broker {
     pub replicas: replica::ReplicaManager,
     /// Prochain identifiant de producer attribué par `InitProducerId`.
     pub next_producer_id: AtomicI64,
+    /// Annulé à l'arrêt du broker : toutes les tâches de fond s'arrêtent.
+    pub shutdown: CancellationToken,
 }
 
 impl Broker {
-    pub fn new(config: Config) -> Self {
-        let replicas = replica::ReplicaManager::new(config.data_dir.clone(), log::LogConfig::default());
-        Self { config, topics: topics::Topics::default(), replicas, next_producer_id: AtomicI64::new(0) }
+    /// Crée le broker, en rechargeant les topics et les logs présents dans
+    /// le répertoire de données.
+    pub fn new(config: Config) -> std::io::Result<Self> {
+        todo!("ch.4 : new")
+    }
+
+    /// Lance une tâche de fond, arrêtée automatiquement à l'arrêt du broker.
+    pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let shutdown = self.shutdown.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                _ = task => {}
+            }
+        });
+    }
+
+    /// Lance les tâches de fond du broker.
+    pub fn start_background_tasks(self: &Arc<Self>) {
+        let broker = self.clone();
+        self.spawn(async move {
+            let mut interval = tokio::time::interval(broker.config.retention_check_interval);
+            loop {
+                interval.tick().await;
+                broker.replicas.apply_retention();
+            }
+        });
     }
 
     /// Crée un topic : l'enregistre dans le registre, puis crée les logs de

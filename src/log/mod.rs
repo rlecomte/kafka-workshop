@@ -3,8 +3,14 @@
 //!
 //! Le log est découpé en segments (voir [`segment`]). Chaque segment est un
 //! fichier nommé d'après l'offset de son premier batch, sur 20 chiffres :
-//! `00000000000000000000.log`, `00000000000000001234.log`...
+//! `00000000000000000000.log`, `00000000000000001234.log`... Chacun a son
+//! index d'offsets (voir [`index`]).
+//!
+//! On n'écrit que dans le dernier segment, le segment **actif**. Quand il
+//! dépasse `segment_bytes`, on en crée un nouveau. Les plus anciens sont
+//! supprimés par la rétention.
 
+pub mod index;
 pub mod segment;
 
 use std::collections::BTreeMap;
@@ -44,18 +50,31 @@ impl std::fmt::Display for ReadError {
 
 /// Paramètres d'un log.
 #[derive(Debug, Clone)]
-pub struct LogConfig {}
+pub struct LogConfig {
+    /// Taille maximale d'un segment (`log.segment.bytes`, 1 Gio par défaut).
+    pub segment_bytes: u64,
+    /// Écart entre deux entrées de l'index (`log.index.interval.bytes`).
+    pub index_interval_bytes: u64,
+    /// Durée de conservation des messages (`log.retention.ms`), `None` : illimitée.
+    pub retention_ms: Option<i64>,
+    /// Taille maximale du log (`log.retention.bytes`), `None` : illimitée.
+    pub retention_bytes: Option<u64>,
+}
 
 impl Default for LogConfig {
     fn default() -> Self {
-        Self {}
+        Self {
+            segment_bytes: 1024 * 1024 * 1024,
+            index_interval_bytes: 4096,
+            retention_ms: Some(7 * 24 * 3600 * 1000),
+            retention_bytes: None,
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct Log {
     dir: PathBuf,
-    #[allow(dead_code)]
     config: LogConfig,
     /// Les segments, indexés par leur offset de base. Le dernier est le
     /// segment actif, le seul dans lequel on écrit.
@@ -69,18 +88,11 @@ pub struct Log {
 impl Log {
     /// Ouvre le log situé dans `dir`, en créant le répertoire si besoin.
     ///
-    /// Pour l'instant, on repart d'un log vide : un éventuel contenu existant
-    /// est écrasé. Le rechargement d'un log existant viendra au chapitre 4.
+    /// Si le répertoire contient déjà des segments, ils sont rechargés. Le
+    /// dernier segment est vérifié et tronqué au premier batch invalide
+    /// (voir [`Segment::recover`]).
     pub fn open(dir: &Path, config: LogConfig) -> io::Result<Log> {
-        std::fs::create_dir_all(dir)?;
-        let segment = Segment::create(dir, 0)?;
-        Ok(Log {
-            dir: dir.to_path_buf(),
-            config,
-            segments: BTreeMap::from([(0, segment)]),
-            next_offset: 0,
-            log_start_offset: 0,
-        })
+        todo!("ch.4 : open")
     }
 
     /// Ajoute des batches à la fin du log, en leur attribuant leurs offsets.
@@ -89,10 +101,32 @@ impl Log {
         let first_offset = self.next_offset;
         for mut batch in batches {
             batch.set_base_offset(self.next_offset);
-            self.active_segment().append(&batch)?;
-            self.next_offset = batch.header.next_offset();
+            self.append_batch(&batch)?;
         }
         Ok(first_offset)
+    }
+
+    /// Ajoute un batch dont l'offset est déjà attribué, en créant un nouveau
+    /// segment si le segment actif est plein.
+    fn append_batch(&mut self, batch: &RecordBatch) -> io::Result<()> {
+        todo!("ch.4 : append_batch")
+    }
+
+    /// Crée un nouveau segment actif, qui commence au log end offset.
+    fn roll(&mut self) -> io::Result<()> {
+        todo!("ch.4 : roll")
+    }
+
+    /// Supprime les segments trop anciens ou en trop, selon `retention_ms` et
+    /// `retention_bytes`. Le segment actif n'est jamais supprimé. Renvoie le
+    /// nombre de segments supprimés.
+    pub fn apply_retention(&mut self, now_ms: i64) -> io::Result<usize> {
+        todo!("ch.4 : apply_retention")
+    }
+
+    /// Les segments, dans l'ordre.
+    pub fn segments(&self) -> impl Iterator<Item = &Segment> {
+        self.segments.values()
     }
 
     /// Lit des batches à partir de `offset`, sur `max_bytes` octets au plus
@@ -148,6 +182,7 @@ impl Log {
     }
 
     fn active_segment(&mut self) -> &mut Segment {
+        // Le dernier segment de la BTreeMap.
         self.segments.values_mut().next_back().expect("un log a toujours au moins un segment")
     }
 }

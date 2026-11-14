@@ -113,6 +113,11 @@ impl Topics {
         Ok(topic)
     }
 
+    /// Réenregistre un topic existant (rechargé depuis le disque).
+    pub fn restore(&self, topic: Topic) {
+        self.topics.write().unwrap().insert(topic.name.clone(), Arc::new(topic));
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<Topic>> {
         self.topics.read().unwrap().get(name).cloned()
     }

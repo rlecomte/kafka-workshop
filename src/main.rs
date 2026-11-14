@@ -32,6 +32,22 @@ async fn main() -> anyhow::Result<()> {
         auto_create_topics: env_or("BROKER_AUTO_CREATE_TOPICS", defaults.auto_create_topics)?,
         data_dir: env_or("BROKER_DATA_DIR", defaults.data_dir)?,
         max_message_bytes: env_or("BROKER_MAX_MESSAGE_BYTES", defaults.max_message_bytes)?,
+        log: broker::log::LogConfig {
+            segment_bytes: env_or("BROKER_SEGMENT_BYTES", defaults.log.segment_bytes)?,
+            index_interval_bytes: env_or("BROKER_INDEX_INTERVAL_BYTES", defaults.log.index_interval_bytes)?,
+            retention_ms: match env_or("BROKER_RETENTION_MS", defaults.log.retention_ms.unwrap_or(-1))? {
+                -1 => None,
+                ms => Some(ms),
+            },
+            retention_bytes: match env_or("BROKER_RETENTION_BYTES", -1i64)? {
+                -1 => None,
+                bytes => Some(bytes as u64),
+            },
+        },
+        retention_check_interval: std::time::Duration::from_millis(env_or(
+            "BROKER_RETENTION_CHECK_INTERVAL_MS",
+            defaults.retention_check_interval.as_millis() as u64,
+        )?),
     };
 
     let listener = TcpListener::bind(("0.0.0.0", config.port))
@@ -39,5 +55,6 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("impossible d'écouter sur le port {}", config.port))?;
     tracing::info!(?config, "broker démarré");
 
-    broker::server::serve(listener, Arc::new(Broker::new(config))).await
+    let broker = Broker::new(config).context("impossible de charger les données")?;
+    broker::server::serve(listener, Arc::new(broker)).await
 }

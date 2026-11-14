@@ -4,7 +4,7 @@
 //! `topics` décrit les topics du cluster (les métadonnées) ; ce module gère
 //! les données que ce broker stocke effectivement.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -15,7 +15,11 @@ use uuid::Uuid;
 
 use crate::log::{Log, LogConfig, ReadError};
 use crate::record_batch::RecordBatch;
-use crate::topics::Topic;
+use crate::topics::{Partition, Topic};
+
+/// Nom du fichier qui mémorise l'identifiant du topic dans le répertoire
+/// d'une partition.
+pub const PARTITION_METADATA: &str = "partition.metadata";
 
 /// La réplique locale d'une partition.
 #[derive(Debug)]
@@ -74,6 +78,10 @@ impl Replica {
         self.log.lock().unwrap().offset_for_timestamp(timestamp)
     }
 
+    pub fn apply_retention(&self, now_ms: i64) -> io::Result<usize> {
+        todo!("ch.4 : apply_retention")
+    }
+
     pub fn log_end_offset(&self) -> i64 {
         self.log.lock().unwrap().log_end_offset()
     }
@@ -101,18 +109,34 @@ impl ReplicaManager {
     /// Crée (ou rouvre) les répliques locales de toutes les partitions d'un topic.
     pub fn create_replicas(&self, topic: &Topic) -> io::Result<()> {
         for partition in &topic.partitions {
-            let dir = self.data_dir.join(format!("{}-{}", topic.name, partition.index));
-            let log = Log::open(&dir, self.log_config.clone())?;
-            let replica = Arc::new(Replica {
-                topic: topic.name.clone(),
-                topic_id: topic.id,
-                partition: partition.index,
-                log: Mutex::new(log),
-                new_data: self.new_data.clone(),
-            });
-            self.replicas.write().unwrap().insert((topic.name.clone(), partition.index), replica);
+            self.open_replica(&topic.name, topic.id, partition.index)?;
         }
         Ok(())
+    }
+
+    /// Ouvre (ou crée) la réplique locale d'une partition. Le fichier
+    /// `partition.metadata` du répertoire mémorise l'identifiant du topic.
+    pub fn open_replica(&self, topic: &str, topic_id: Uuid, partition: i32) -> io::Result<Arc<Replica>> {
+        todo!("ch.4 : open_replica")
+    }
+
+    /// Recharge les répliques présentes dans le répertoire de données, et
+    /// renvoie les topics correspondants.
+    ///
+    /// Chaque sous-répertoire `<topic>-<partition>` contenant un fichier
+    /// `partition.metadata` est une réplique. Le nom du topic peut lui-même
+    /// contenir des `-` : on coupe au dernier.
+    pub fn load_existing(&self) -> io::Result<Vec<Topic>> {
+        todo!("ch.4 : load_existing")
+    }
+
+    pub fn all(&self) -> Vec<Arc<Replica>> {
+        self.replicas.read().unwrap().values().cloned().collect()
+    }
+
+    /// Applique la rétention à toutes les répliques.
+    pub fn apply_retention(&self) {
+        todo!("ch.4 : apply_retention")
     }
 
     pub fn get(&self, topic: &str, partition: i32) -> Option<Arc<Replica>> {
