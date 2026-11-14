@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// Longueur maximale d'un nom de topic dans Kafka.
 pub const MAX_TOPIC_NAME_LEN: usize = 249;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Topic {
     pub name: String,
     /// Identifiant unique, attribué à la création (KIP-516). Il permet de

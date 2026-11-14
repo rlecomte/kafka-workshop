@@ -45,11 +45,10 @@ impl Broker {
         (broker.host.as_str(), broker.port).to_socket_addrs().ok()?.next()
     }
 
-    /// Démarre ou arrête les fetchers pour qu'il y en ait exactement un par
-    /// partition dont ce broker est follower, vers le leader actuel.
-    pub(crate) fn sync_fetchers(self: &Arc<Self>) {
+    /// Les partitions que ce broker doit suivre, avec leur leader et l'epoch.
+    fn wanted_fetchers(&self) -> HashMap<(String, i32), (i32, i32)> {
         let me = self.config.node_id;
-        let mut wanted: HashMap<(String, i32), (i32, i32)> = HashMap::new();
+        let mut wanted = HashMap::new();
         for topic in self.topics.list() {
             for p in &topic.partitions {
                 if p.leader >= 0 && p.leader != me && p.replicas.contains(&me) {
@@ -57,16 +56,26 @@ impl Broker {
                 }
             }
         }
+        wanted
+    }
 
-        let mut fetchers = self.fetchers.lock().unwrap();
-        fetchers.retain(|key, fetcher| {
+    /// Arrête les fetchers qui ne correspondent plus aux métadonnées (la
+    /// partition a changé de leader ou d'epoch, ou ce broker en est leader).
+    pub(crate) fn stop_stale_fetchers(&self) {
+        let wanted = self.wanted_fetchers();
+        self.fetchers.lock().unwrap().retain(|key, fetcher| {
             let keep = wanted.get(key) == Some(&(fetcher.leader, fetcher.leader_epoch));
             if !keep {
                 fetcher.task.abort();
             }
             keep
         });
-        for (key, (leader, leader_epoch)) in wanted {
+    }
+
+    /// Démarre un fetcher pour chaque partition suivie qui n'en a pas.
+    pub(crate) fn start_missing_fetchers(self: &Arc<Self>) {
+        let mut fetchers = self.fetchers.lock().unwrap();
+        for (key, (leader, leader_epoch)) in self.wanted_fetchers() {
             if fetchers.contains_key(&key) {
                 continue;
             }

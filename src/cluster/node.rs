@@ -60,6 +60,20 @@ impl ClusterNode {
     }
 }
 
+/// Le nouvel état d'une partition après la mort de brokers, ou `None` s'il
+/// n'y a rien à changer.
+///
+/// - Les brokers morts sortent de l'ISR (sauf le dernier membre : on garde
+///   trace de la dernière réplique à jour, qui pourra redevenir leader).
+/// - Si le leader est mort, le nouveau leader est la première réplique
+///   vivante de l'ISR, et l'epoch est incrémentée. Si aucune n'est vivante,
+///   la partition est hors ligne (leader -1), sauf élection « impure ».
+/// - Si une partition hors ligne voit revenir une réplique de l'ISR, celle-ci
+///   devient leader.
+pub fn elect(record: &PartitionRecord, replicas: &[i32], state: &ClusterState, unclean: bool) -> Option<PartitionRecord> {
+    todo!("ch.8 : elect")
+}
+
 impl Broker {
     pub fn cluster(&self) -> Option<&ClusterNode> {
         self.cluster.as_ref()
@@ -166,7 +180,9 @@ impl Broker {
             tokio::pin!(changed);
             changed.as_mut().enable();
 
-            if node.state().controller.is_none() {
+            if self.is_controller() {
+                self.reconcile_partitions().await;
+            } else if node.state().controller.is_none() {
                 let key = node.keys.controller();
                 let record = serde_json::to_vec(&ControllerRecord { node_id: self.config.node_id }).unwrap();
                 let lease = Some(node.lease.load(Ordering::SeqCst));
@@ -178,6 +194,16 @@ impl Broker {
             }
             let _ = tokio::time::timeout(Duration::from_secs(1), changed).await;
         }
+    }
+
+    /// Le travail du controller : pour chaque partition dont le leader est
+    /// mort, élire un nouveau leader parmi les répliques vivantes de l'ISR ;
+    /// retirer les brokers morts des ISR.
+    ///
+    /// Appelée à chaque changement de l'état du cluster (et au moins une fois
+    /// par seconde) tant que ce broker est controller.
+    async fn reconcile_partitions(&self) {
+        todo!("ch.8 : reconcile_partitions")
     }
 
     /// Ce broker est-il le controller ?
@@ -231,16 +257,22 @@ impl Broker {
                 }
             }
         }
-        // Rôle de chaque réplique locale (leader ou follower, epoch, ISR).
+        self.topics.replace_all(topics.clone());
+        // D'abord arrêter les fetchers vers un ancien leader, puis appliquer
+        // les nouveaux rôles (un nouveau follower tronque son log), enfin
+        // démarrer les fetchers vers les nouveaux leaders.
+        self.stop_stale_fetchers();
         for topic in &topics {
             for partition in &topic.partitions {
-                if let Some(replica) = self.replicas.get(&topic.name, partition.index) {
-                    replica.update_partition_state(partition);
+                if let Some(replica) = self.replicas.get(&topic.name, partition.index)
+                    && replica.update_partition_state(partition)
+                {
+                    let role = if partition.leader == me { "leader" } else { "follower" };
+                    tracing::info!(topic = %topic.name, partition = partition.index, epoch = partition.leader_epoch, role, "nouveau rôle");
                 }
             }
         }
-        self.topics.replace_all(topics);
-        self.sync_fetchers();
+        self.start_missing_fetchers();
         self.sync_offsets_partitions();
         // Le high watermark a pu changer (ISR modifiée).
         self.replicas.new_data.notify_waiters();
@@ -368,5 +400,55 @@ impl Broker {
             node.wait_for_change(Duration::from_millis(100)).await;
         }
         Ok(Arc::new(topic))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::BrokerRecord;
+
+    fn state(alive: &[i32]) -> ClusterState {
+        let mut state = ClusterState::default();
+        for &id in alive {
+            state.brokers.insert(id, BrokerRecord { node_id: id, host: "localhost".into(), port: 9092 });
+        }
+        state
+    }
+
+    fn record(leader: i32, epoch: i32, isr: &[i32]) -> PartitionRecord {
+        PartitionRecord { leader, leader_epoch: epoch, isr: isr.to_vec() }
+    }
+
+    #[test]
+    fn nothing_to_do_when_everyone_is_alive() {
+        assert_eq!(elect(&record(0, 3, &[0, 1, 2]), &[0, 1, 2], &state(&[0, 1, 2]), false), None);
+    }
+
+    #[test]
+    fn dead_follower_leaves_the_isr() {
+        assert_eq!(elect(&record(0, 3, &[0, 1, 2]), &[0, 1, 2], &state(&[0, 2]), false), Some(record(0, 3, &[0, 2])));
+    }
+
+    #[test]
+    fn dead_leader_is_replaced_by_the_next_isr_member() {
+        assert_eq!(elect(&record(0, 3, &[0, 1, 2]), &[0, 1, 2], &state(&[1, 2]), false), Some(record(1, 4, &[1, 2])));
+    }
+
+    #[test]
+    fn replicas_outside_the_isr_are_not_elected() {
+        // 2 est vivant mais n'est pas dans l'ISR : la partition est hors ligne.
+        assert_eq!(elect(&record(0, 3, &[0, 1]), &[0, 1, 2], &state(&[2]), false), Some(record(-1, 4, &[0, 1])));
+        assert_eq!(elect(&record(-1, 4, &[0, 1]), &[0, 1, 2], &state(&[2]), false), None);
+    }
+
+    #[test]
+    fn unclean_election_picks_any_live_replica() {
+        assert_eq!(elect(&record(0, 3, &[0, 1]), &[0, 1, 2], &state(&[2]), true), Some(record(2, 4, &[2])));
+    }
+
+    #[test]
+    fn offline_partition_recovers_when_an_isr_member_returns() {
+        assert_eq!(elect(&record(-1, 4, &[0, 1]), &[0, 1, 2], &state(&[1, 2]), false), Some(record(1, 5, &[1])));
     }
 }

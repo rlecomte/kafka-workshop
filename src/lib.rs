@@ -11,6 +11,10 @@
 //! - [`groups`] : le coordinateur des consumer groups et leurs offsets ;
 //! - [`cluster`] : le mode cluster, coordonné par etcd.
 
+// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
+// certains imports, paramètres et fonctions ne servent pas encore.
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 pub mod apis;
 pub mod cluster;
 pub mod groups;
@@ -70,6 +74,9 @@ pub struct Config {
     /// Un follower qui n'a pas rattrapé le leader depuis ce délai sort de
     /// l'ISR (`replica.lag.time.max.ms`, 30 s dans Kafka).
     pub replica_lag_time_max: Duration,
+    /// Autoriser l'élection d'un leader hors de l'ISR quand toute l'ISR est
+    /// morte, au prix d'une perte de données (`unclean.leader.election.enable`).
+    pub unclean_leader_election: bool,
 }
 
 impl Default for Config {
@@ -90,6 +97,7 @@ impl Default for Config {
             cluster: None,
             min_insync_replicas: 1,
             replica_lag_time_max: Duration::from_secs(10),
+            unclean_leader_election: false,
         }
     }
 }
@@ -117,7 +125,8 @@ impl Broker {
     /// le répertoire de données sont rechargés. En mode cluster, les topics
     /// viendront d'etcd (voir [`Broker::start`]).
     pub fn new(config: Config) -> std::io::Result<Self> {
-        let replicas = replica::ReplicaManager::new(config.node_id, config.data_dir.clone(), config.log.clone());
+        let replicas =
+            replica::ReplicaManager::new(config.node_id, config.cluster.is_none(), config.data_dir.clone(), config.log.clone());
         let topics = topics::Topics::new(config.node_id);
         if config.cluster.is_none() {
             for topic in replicas.load_existing(config.node_id)? {
@@ -196,6 +205,15 @@ impl Broker {
             loop {
                 interval.tick().await;
                 broker.groups.tick();
+            }
+        });
+
+        let broker = self.clone();
+        self.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                broker.replicas.checkpoint_high_watermarks();
             }
         });
 

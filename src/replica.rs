@@ -24,6 +24,9 @@ use crate::topics::{Partition, Topic};
 /// d'une partition.
 pub const PARTITION_METADATA: &str = "partition.metadata";
 
+/// Nom du fichier qui sauvegarde le high watermark d'une partition.
+pub const HIGH_WATERMARK_FILE: &str = "high-watermark";
+
 /// La réplique locale d'une partition.
 #[derive(Debug)]
 pub struct Replica {
@@ -52,6 +55,8 @@ struct ReplicationState {
     /// L'offset jusqu'où les données sont répliquées sur toute l'ISR, donc
     /// visibles par les consumers.
     high_watermark: i64,
+    /// La dernière valeur sauvegardée sur disque.
+    checkpointed_high_watermark: i64,
     /// Côté leader : la position de chaque follower.
     followers: HashMap<i32, FollowerState>,
 }
@@ -83,24 +88,43 @@ pub struct FetchData {
 }
 
 impl Replica {
-    fn new(topic: &str, topic_id: Uuid, partition: i32, node_id: i32, log: Log, new_data: Arc<Notify>) -> Replica {
-        let high_watermark = log.log_end_offset();
-        Replica {
+    /// Une réplique dont le rôle sera fixé par les métadonnées du cluster
+    /// (`standalone = false`), ou l'unique réplique, leader (`standalone = true`).
+    fn new(
+        topic: &str,
+        topic_id: Uuid,
+        partition: i32,
+        node_id: i32,
+        log: Log,
+        high_watermark: i64,
+        standalone: bool,
+        new_data: Arc<Notify>,
+    ) -> Replica {
+        let high_watermark = high_watermark.min(log.log_end_offset());
+        let replica = Replica {
             topic: topic.to_string(),
             topic_id,
             partition,
             node_id,
             log: Mutex::new(log),
-            // Par défaut (mode autonome) : seule réplique, donc leader.
             state: Mutex::new(ReplicationState {
-                is_leader: true,
-                leader_epoch: 0,
-                isr: vec![node_id],
+                is_leader: standalone,
+                leader_epoch: if standalone { 0 } else { -1 },
+                isr: if standalone { vec![node_id] } else { vec![] },
                 high_watermark,
+                checkpointed_high_watermark: high_watermark,
                 followers: HashMap::new(),
             }),
             new_data,
-        }
+        };
+        replica.update_high_watermark();
+        replica
+    }
+
+    /// Sauvegarde le high watermark sur disque s'il a changé depuis la
+    /// dernière sauvegarde (`replication-offset-checkpoint` dans Kafka).
+    pub fn checkpoint_high_watermark(&self) -> io::Result<()> {
+        todo!("ch.8 : checkpoint_high_watermark")
     }
 
     /// Écrit des batches en tant que leader : attribue les offsets, puis met
@@ -172,30 +196,10 @@ impl Replica {
     }
 
     /// Met à jour le rôle de la réplique d'après les métadonnées du cluster.
-    /// Renvoie `true` si la réplique vient de devenir leader ou follower.
+    /// Renvoie `true` si la réplique vient de devenir leader, ou follower d'un
+    /// nouveau leader (nouvelle epoch).
     pub fn update_partition_state(&self, partition: &Partition) -> bool {
-        let is_leader = partition.leader == self.node_id;
-        let changed = {
-            let mut state = self.state.lock().unwrap();
-            let changed = state.is_leader != is_leader || state.leader_epoch != partition.leader_epoch;
-            if changed && is_leader {
-                // Nouveau leader : on ne sait encore rien des followers. On leur
-                // laisse le délai habituel pour se manifester.
-                let now = Instant::now();
-                state.followers = partition
-                    .replicas
-                    .iter()
-                    .filter(|&&r| r != self.node_id)
-                    .map(|&r| (r, FollowerState { log_end_offset: 0, last_caught_up: now }))
-                    .collect();
-            }
-            state.is_leader = is_leader;
-            state.leader_epoch = partition.leader_epoch;
-            state.isr = partition.isr.clone();
-            changed
-        };
-        self.update_high_watermark();
-        changed
+        todo!("ch.8 : update_partition_state")
     }
 
     /// Côté leader : enregistre le Fetch d'un follower. Son `fetch_offset`
@@ -286,29 +290,13 @@ impl Replica {
         self.log.lock().unwrap().offset_for_timestamp(timestamp)
     }
 
-    /// Lit tout le log (jusqu'au high watermark).
+    /// Lit tout le log, jusqu'au log end offset.
+    ///
+    /// Utilisé par un leader pour recharger `__consumer_offsets` : tout ce qui
+    /// est dans le log d'un leader finira répliqué, même si son high watermark
+    /// est encore en retard (il vient de devenir leader).
     pub fn read_all(&self) -> io::Result<Bytes> {
-        let mut all = bytes::BytesMut::new();
-        let mut offset = self.log_start_offset();
-        loop {
-            let data = match self.read(offset, 1024 * 1024) {
-                Ok(data) => data,
-                Err(ReadError::Io(e)) => return Err(e),
-                Err(ReadError::OffsetOutOfRange { .. }) => break,
-            };
-            if data.records.is_empty() {
-                break;
-            }
-            let mut next = offset;
-            let mut rest = &data.records[..];
-            while let Ok(header) = crate::record_batch::RecordBatchHeader::parse(rest) {
-                next = header.next_offset();
-                rest = &rest[header.total_size()..];
-            }
-            all.extend_from_slice(&data.records);
-            offset = next;
-        }
-        Ok(all.freeze())
+        todo!("ch.8 : read_all")
     }
 
     pub fn apply_retention(&self, now_ms: i64) -> io::Result<usize> {
@@ -320,6 +308,8 @@ impl Replica {
 #[derive(Debug)]
 pub struct ReplicaManager {
     node_id: i32,
+    /// Mode autonome : chaque réplique est leader et seule dans l'ISR.
+    standalone: bool,
     data_dir: PathBuf,
     log_config: LogConfig,
     replicas: RwLock<HashMap<(String, i32), Arc<Replica>>>,
@@ -328,8 +318,8 @@ pub struct ReplicaManager {
 }
 
 impl ReplicaManager {
-    pub fn new(node_id: i32, data_dir: PathBuf, log_config: LogConfig) -> Self {
-        Self { node_id, data_dir, log_config, replicas: RwLock::default(), new_data: Arc::new(Notify::new()) }
+    pub fn new(node_id: i32, standalone: bool, data_dir: PathBuf, log_config: LogConfig) -> Self {
+        Self { node_id, standalone, data_dir, log_config, replicas: RwLock::default(), new_data: Arc::new(Notify::new()) }
     }
 
     /// Crée (ou rouvre) les répliques locales de toutes les partitions d'un topic.
@@ -353,7 +343,21 @@ impl ReplicaManager {
         }
         let log = Log::open(&dir, config)?;
         std::fs::write(dir.join(PARTITION_METADATA), format!("version: 0\ntopic_id: {topic_id}\n"))?;
-        let replica = Arc::new(Replica::new(topic, topic_id, partition, self.node_id, log, self.new_data.clone()));
+        // Le high watermark sauvegardé (0 si aucun).
+        let high_watermark = std::fs::read_to_string(dir.join(HIGH_WATERMARK_FILE))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        let replica = Arc::new(Replica::new(
+            topic,
+            topic_id,
+            partition,
+            self.node_id,
+            log,
+            high_watermark,
+            self.standalone,
+            self.new_data.clone(),
+        ));
         self.replicas.write().unwrap().insert((topic.to_string(), partition), replica.clone());
         Ok(replica)
     }
@@ -400,6 +404,15 @@ impl ReplicaManager {
 
     pub fn all(&self) -> Vec<Arc<Replica>> {
         self.replicas.read().unwrap().values().cloned().collect()
+    }
+
+    /// Sauvegarde le high watermark de toutes les répliques.
+    pub fn checkpoint_high_watermarks(&self) {
+        for replica in self.all() {
+            if let Err(e) = replica.checkpoint_high_watermark() {
+                tracing::error!(topic = %replica.topic, partition = replica.partition, "sauvegarde du high watermark impossible : {e}");
+            }
+        }
     }
 
     /// Applique la rétention à toutes les répliques.

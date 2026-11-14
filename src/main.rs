@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
             "BROKER_REPLICA_LAG_TIME_MAX_MS",
             defaults.replica_lag_time_max.as_millis() as u64,
         )?),
+        unclean_leader_election: env_or("BROKER_UNCLEAN_LEADER_ELECTION", defaults.unclean_leader_election)?,
     };
 
     let listener = TcpListener::bind(("0.0.0.0", config.port))
