@@ -221,7 +221,19 @@ impl Segment {
     /// Supprime les batches à partir de `offset` (le batch qui contient
     /// `offset` est supprimé en entier).
     pub fn truncate_to(&mut self, offset: i64) -> io::Result<()> {
-        todo!("ch.7 : truncate_to")
+        let mut cut = self.size;
+        for entry in self.headers(self.index.lookup(offset)) {
+            let (position, header) = entry?;
+            if header.last_offset() >= offset {
+                cut = position;
+                break;
+            }
+        }
+        self.file.set_len(cut)?;
+        self.size = cut;
+        // Recalcule next_offset, max_timestamp et l'index.
+        self.recover()?;
+        Ok(())
     }
 
     /// Supprime les fichiers du segment.

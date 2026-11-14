@@ -106,23 +106,43 @@ impl Replica {
     /// Écrit des batches en tant que leader : attribue les offsets, puis met
     /// à jour le high watermark.
     pub fn append(&self, batches: Vec<RecordBatch>) -> io::Result<AppendInfo> {
-        todo!("ch.7 : append")
+        let epoch = self.state.lock().unwrap().leader_epoch;
+        let info = {
+            let mut log = self.log.lock().unwrap();
+            let base_offset = log.append_with_epoch(batches, epoch)?;
+            AppendInfo { base_offset, next_offset: log.log_end_offset(), log_start_offset: log.log_start_offset() }
+        };
+        self.update_high_watermark();
+        self.new_data.notify_waiters();
+        Ok(info)
     }
 
     /// Écrit des batches copiés depuis le leader (follower), puis adopte le
     /// high watermark du leader (sans dépasser son propre log end offset).
     pub fn append_as_follower(&self, batches: Vec<RecordBatch>, leader_high_watermark: i64) -> io::Result<()> {
-        todo!("ch.7 : append_as_follower")
+        let log_end_offset = {
+            let mut log = self.log.lock().unwrap();
+            log.append_replicated(batches)?;
+            log.log_end_offset()
+        };
+        let mut state = self.state.lock().unwrap();
+        state.high_watermark = state.high_watermark.max(leader_high_watermark.min(log_end_offset));
+        Ok(())
     }
 
     /// Lecture pour un consumer : jusqu'au high watermark.
     pub fn read(&self, offset: i64, max_bytes: usize) -> Result<FetchData, ReadError> {
-        todo!("ch.7 : read")
+        let high_watermark = self.high_watermark();
+        let log = self.log.lock().unwrap();
+        let records = log.read(offset, max_bytes, high_watermark)?;
+        Ok(FetchData { records, high_watermark, log_start_offset: log.log_start_offset() })
     }
 
     /// Lecture pour un follower : jusqu'au log end offset.
     pub fn read_for_follower(&self, offset: i64, max_bytes: usize) -> Result<FetchData, ReadError> {
-        todo!("ch.7 : read_for_follower")
+        let log = self.log.lock().unwrap();
+        let records = log.read(offset, max_bytes, i64::MAX)?;
+        Ok(FetchData { records, high_watermark: self.high_watermark(), log_start_offset: log.log_start_offset() })
     }
 
     /// Le high watermark : l'offset (exclu) jusqu'où les données sont visibles
@@ -154,36 +174,112 @@ impl Replica {
     /// Met à jour le rôle de la réplique d'après les métadonnées du cluster.
     /// Renvoie `true` si la réplique vient de devenir leader ou follower.
     pub fn update_partition_state(&self, partition: &Partition) -> bool {
-        todo!("ch.7 : update_partition_state")
+        let is_leader = partition.leader == self.node_id;
+        let changed = {
+            let mut state = self.state.lock().unwrap();
+            let changed = state.is_leader != is_leader || state.leader_epoch != partition.leader_epoch;
+            if changed && is_leader {
+                // Nouveau leader : on ne sait encore rien des followers. On leur
+                // laisse le délai habituel pour se manifester.
+                let now = Instant::now();
+                state.followers = partition
+                    .replicas
+                    .iter()
+                    .filter(|&&r| r != self.node_id)
+                    .map(|&r| (r, FollowerState { log_end_offset: 0, last_caught_up: now }))
+                    .collect();
+            }
+            state.is_leader = is_leader;
+            state.leader_epoch = partition.leader_epoch;
+            state.isr = partition.isr.clone();
+            changed
+        };
+        self.update_high_watermark();
+        changed
     }
 
     /// Côté leader : enregistre le Fetch d'un follower. Son `fetch_offset`
     /// indique qu'il a tout ce qui précède. Renvoie la nouvelle ISR si le
     /// follower doit y entrer (il a rattrapé le high watermark).
     pub fn record_follower_fetch(&self, follower: i32, fetch_offset: i64) -> Option<Vec<i32>> {
-        todo!("ch.7 : record_follower_fetch")
+        let log_end_offset = self.log_end_offset();
+        let expand = {
+            let mut state = self.state.lock().unwrap();
+            let now = Instant::now();
+            let entry = state.followers.entry(follower).or_insert(FollowerState { log_end_offset: 0, last_caught_up: now });
+            entry.log_end_offset = fetch_offset;
+            if fetch_offset >= log_end_offset {
+                entry.last_caught_up = now;
+            }
+            let caught_up = fetch_offset >= state.high_watermark;
+            (state.is_leader && caught_up && !state.isr.contains(&follower)).then(|| {
+                let mut isr = state.isr.clone();
+                isr.push(follower);
+                isr
+            })
+        };
+        self.update_high_watermark();
+        expand
     }
 
     /// Côté leader : la nouvelle ISR si des followers sont en retard depuis
     /// plus de `max_lag`.
     pub fn isr_to_shrink(&self, max_lag: Duration) -> Option<Vec<i32>> {
-        todo!("ch.7 : isr_to_shrink")
+        let state = self.state.lock().unwrap();
+        if !state.is_leader {
+            return None;
+        }
+        let now = Instant::now();
+        let isr: Vec<i32> = state
+            .isr
+            .iter()
+            .copied()
+            .filter(|r| *r == self.node_id || state.followers.get(r).is_some_and(|f| now.duration_since(f.last_caught_up) <= max_lag))
+            .collect();
+        (isr.len() < state.isr.len()).then_some(isr)
     }
 
     /// Côté leader : le high watermark est le plus petit log end offset des
     /// répliques de l'ISR. Il ne recule jamais.
     fn update_high_watermark(&self) {
-        todo!("ch.7 : update_high_watermark")
+        let log_end_offset = self.log_end_offset();
+        let advanced = {
+            let mut state = self.state.lock().unwrap();
+            if !state.is_leader {
+                return;
+            }
+            let computed = state
+                .isr
+                .iter()
+                .map(|r| if *r == self.node_id { log_end_offset } else { state.followers.get(r).map_or(0, |f| f.log_end_offset) })
+                .min()
+                .unwrap_or(log_end_offset);
+            let previous = state.high_watermark;
+            state.high_watermark = previous.max(computed.min(log_end_offset));
+            state.high_watermark > previous
+        };
+        if advanced {
+            self.new_data.notify_waiters();
+        }
     }
 
     /// Supprime tout ce qui suit `offset` (follower qui a divergé du leader).
     pub fn truncate_to(&self, offset: i64) -> io::Result<()> {
-        todo!("ch.7 : truncate_to")
+        let log_end_offset = {
+            let mut log = self.log.lock().unwrap();
+            log.truncate_to(offset)?;
+            log.log_end_offset()
+        };
+        let mut state = self.state.lock().unwrap();
+        state.high_watermark = state.high_watermark.min(log_end_offset);
+        Ok(())
     }
 
     /// Vide le log et le fait recommencer à `offset`.
     pub fn reset_to(&self, offset: i64) -> io::Result<()> {
-        todo!("ch.7 : reset_to")
+        self.log.lock().unwrap().reset_to(offset)?;
+        self.state.lock().unwrap().high_watermark = offset;
+        Ok(())
     }
 
     pub fn offset_for_timestamp(&self, timestamp: i64) -> std::io::Result<Option<i64>> {

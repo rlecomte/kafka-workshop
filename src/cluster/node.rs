@@ -251,7 +251,18 @@ impl Broker {
     /// personne ne l'ait modifiée depuis notre dernière lecture (le controller
     /// a pu élire un autre leader entre-temps).
     pub(crate) async fn alter_isr(&self, topic: &str, partition: i32, isr: Vec<i32>) {
-        todo!("ch.7 : alter_isr")
+        let Some(node) = self.cluster() else { return };
+        let Some((record, revision)) = node.state().partitions.get(&(topic.to_string(), partition)).cloned() else { return };
+        if record.leader != self.config.node_id || record.isr == isr {
+            return;
+        }
+        let key = node.keys.partition(topic, partition);
+        let value = serde_json::to_vec(&PartitionRecord { isr: isr.clone(), ..record }).unwrap();
+        match node.etcd.txn(&[Compare::ModRevision(key.clone(), revision)], &[Op::Put { key, value, lease: None }], &[]).await {
+            Ok(true) => tracing::info!(topic, partition, ?isr, "ISR modifiée"),
+            Ok(false) => tracing::debug!(topic, partition, "ISR modifiée entre-temps, abandon"),
+            Err(e) => tracing::warn!(topic, partition, "modification de l'ISR impossible : {e:#}"),
+        }
     }
 
     /// Charge les offsets des partitions de `__consumer_offsets` dont ce

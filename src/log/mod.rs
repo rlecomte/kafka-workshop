@@ -130,25 +130,61 @@ impl Log {
 
     /// Comme [`Log::append`], en inscrivant l'epoch du leader dans chaque batch.
     pub fn append_with_epoch(&mut self, batches: Vec<RecordBatch>, leader_epoch: i32) -> io::Result<i64> {
-        todo!("ch.7 : append_with_epoch")
+        let first_offset = self.next_offset;
+        for mut batch in batches {
+            batch.set_base_offset(self.next_offset);
+            if leader_epoch >= 0 {
+                batch.set_partition_leader_epoch(leader_epoch);
+            }
+            self.append_batch(&batch)?;
+        }
+        Ok(first_offset)
     }
 
     /// Ajoute des batches qui ont déjà leurs offsets (copiés depuis le leader
     /// par un follower). Le premier doit commencer au log end offset.
     pub fn append_replicated(&mut self, batches: Vec<RecordBatch>) -> io::Result<()> {
-        todo!("ch.7 : append_replicated")
+        for batch in batches {
+            if batch.header.base_offset != self.next_offset {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("batch à l'offset {}, attendu {}", batch.header.base_offset, self.next_offset),
+                ));
+            }
+            self.append_batch(&batch)?;
+        }
+        Ok(())
     }
 
     /// Supprime tout ce qui suit `offset` (exclu) : le log end offset devient
     /// `offset` (ou le début du batch qui le contient).
     pub fn truncate_to(&mut self, offset: i64) -> io::Result<()> {
-        todo!("ch.7 : truncate_to")
+        if offset >= self.next_offset {
+            return Ok(());
+        }
+        // Les segments qui commencent après l'offset disparaissent entièrement
+        // (sauf le premier, qu'on garde vide).
+        while self.segments.len() > 1 && *self.segments.keys().next_back().unwrap() >= offset {
+            let (_, segment) = self.segments.pop_last().unwrap();
+            segment.delete()?;
+        }
+        let active = self.active_segment();
+        active.truncate_to(offset)?;
+        self.next_offset = active.next_offset();
+        tracing::info!(dir = %self.dir.display(), log_end_offset = self.next_offset, "log tronqué");
+        Ok(())
     }
 
     /// Vide le log et le fait recommencer à `offset` (un follower dont le
     /// leader a supprimé les données par rétention).
     pub fn reset_to(&mut self, offset: i64) -> io::Result<()> {
-        todo!("ch.7 : reset_to")
+        while let Some((_, segment)) = self.segments.pop_first() {
+            segment.delete()?;
+        }
+        self.segments.insert(offset, Segment::create(&self.dir, offset, self.config.index_interval_bytes)?);
+        self.next_offset = offset;
+        self.log_start_offset = offset;
+        Ok(())
     }
 
     /// Ajoute un batch dont l'offset est déjà attribué, en créant un nouveau

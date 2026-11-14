@@ -99,7 +99,19 @@ impl Broker {
 
     /// Écrit des commits dans `__consumer_offsets`, puis les applique en mémoire.
     async fn store_commits(&self, group_id: &str, commits: &[(OffsetKey, OffsetValue)]) -> anyhow::Result<()> {
-        todo!("ch.7 : store_commits")
+        let topic = self.ensure_offsets_topic().await?;
+        let partition = offsets::partition_for(group_id, topic.partitions.len() as i32);
+        let replica = self
+            .leader_replica(OFFSETS_TOPIC, partition)
+            .map_err(|e| anyhow::anyhow!("partition {partition} de {OFFSETS_TOPIC} : {e:?}"))?;
+        let batches = record_batch::parse_batches(offsets::encode_commits(commits))?;
+        let info = replica.append(batches)?;
+        // Comme Kafka, on attend que le commit soit répliqué (acks=all).
+        if !self.wait_for_high_watermark(&replica, info.next_offset, std::time::Duration::from_secs(5)).await {
+            anyhow::bail!("commit non répliqué à temps");
+        }
+        self.groups.apply_commits(commits.to_vec());
+        Ok(())
     }
 
     pub(super) fn handle_offset_fetch(&self, request: OffsetFetchRequest, ctx: &RequestContext) -> OffsetFetchResponse {

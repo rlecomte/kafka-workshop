@@ -98,6 +98,40 @@ impl Broker {
         follower: Option<i32>,
         expansions: &mut Vec<IsrExpansion>,
     ) -> PartitionData {
-        todo!("ch.7 : fetch_partition")
+        let data = PartitionData::default().with_partition_index(p.partition);
+        let replica = match self.leader_replica(topic, p.partition) {
+            Ok(replica) => replica,
+            Err(e) => return data.with_error_code(e.code()).with_high_watermark(-1),
+        };
+        let read = match follower {
+            // Un follower lit jusqu'au log end offset ; son fetch_offset dit au
+            // leader où il en est.
+            Some(follower) => {
+                if let Some(isr) = replica.record_follower_fetch(follower, p.fetch_offset) {
+                    expansions.push((topic.to_string(), p.partition, isr));
+                }
+                replica.read_for_follower(p.fetch_offset, max_bytes)
+            }
+            // Un consumer lit jusqu'au high watermark.
+            None => replica.read(p.fetch_offset, max_bytes),
+        };
+        match read {
+            Ok(read) => data
+                .with_high_watermark(read.high_watermark)
+                .with_last_stable_offset(read.high_watermark)
+                .with_log_start_offset(read.log_start_offset)
+                .with_aborted_transactions(None)
+                .with_records(Some(read.records)),
+            Err(e) => {
+                tracing::debug!(topic, partition = p.partition, "fetch refusé : {e}");
+                let code = match e {
+                    ReadError::OffsetOutOfRange { .. } => ResponseError::OffsetOutOfRange,
+                    ReadError::Io(_) => ResponseError::KafkaStorageError,
+                };
+                data.with_error_code(code.code())
+                    .with_high_watermark(replica.high_watermark())
+                    .with_log_start_offset(replica.log_start_offset())
+            }
+        }
     }
 }

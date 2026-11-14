@@ -11,10 +11,6 @@
 //! - [`groups`] : le coordinateur des consumer groups et leurs offsets ;
 //! - [`cluster`] : le mode cluster, coordonné par etcd.
 
-// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
-// certains imports, paramètres et fonctions ne servent pas encore.
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
-
 pub mod apis;
 pub mod cluster;
 pub mod groups;
@@ -221,7 +217,18 @@ impl Broker {
     /// Attend que le high watermark de `replica` atteigne `offset`, au plus
     /// `timeout`. Renvoie `false` en cas de délai dépassé.
     pub async fn wait_for_high_watermark(&self, replica: &replica::Replica, offset: i64, timeout: Duration) -> bool {
-        todo!("ch.7 : wait_for_high_watermark")
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.replicas.new_data.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if replica.high_watermark() >= offset {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return replica.high_watermark() >= offset;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
