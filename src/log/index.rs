@@ -70,18 +70,34 @@ impl OffsetIndex {
 
     /// Ajoute une entrée : le batch d'offset `offset` commence à `position`.
     pub fn append(&mut self, offset: i64, position: u64) -> io::Result<()> {
-        todo!("ch.4 : append")
+        let relative = (offset - self.base_offset) as u32;
+        let position = position as u32;
+        let mut entry = [0u8; ENTRY_SIZE];
+        entry[0..4].copy_from_slice(&relative.to_be_bytes());
+        entry[4..8].copy_from_slice(&position.to_be_bytes());
+        self.file.write_all(&entry)?;
+        self.entries.push((relative, position));
+        Ok(())
     }
 
     /// La position à partir de laquelle chercher `offset` : celle de la
     /// dernière entrée dont l'offset est inférieur ou égal, ou 0.
     pub fn lookup(&self, offset: i64) -> u64 {
-        todo!("ch.4 : lookup")
+        if offset < self.base_offset {
+            return 0;
+        }
+        let relative = (offset - self.base_offset).min(u32::MAX as i64) as u32;
+        // partition_point : nombre d'entrées dont l'offset est <= relative.
+        let count = self.entries.partition_point(|&(o, _)| o <= relative);
+        if count == 0 { 0 } else { self.entries[count - 1].1 as u64 }
     }
 
     /// Supprime les entrées qui pointent à `position` ou au-delà.
     pub fn truncate_to_position(&mut self, position: u64) -> io::Result<()> {
-        todo!("ch.4 : truncate_to_position")
+        let keep = self.entries.partition_point(|&(_, p)| (p as u64) < position);
+        self.entries.truncate(keep);
+        self.file.set_len((keep * ENTRY_SIZE) as u64)?;
+        Ok(())
     }
 
     pub fn entries(&self) -> &[(u32, u32)] {

@@ -34,7 +34,23 @@ pub struct Segment {
 impl Segment {
     /// Crée un nouveau segment vide (des fichiers existants sont écrasés).
     pub fn create(dir: &Path, base_offset: i64, index_interval_bytes: u64) -> io::Result<Segment> {
-        todo!("ch.4 : create")
+        let path = log_file_path(dir, base_offset);
+        File::create(&path)?;
+        // En mode « append », chaque écriture va à la fin du fichier, même
+        // après un `set_len` qui l'a raccourci (voir `recover`).
+        let file = OpenOptions::new().read(true).append(true).open(&path)?;
+        let index = OffsetIndex::create(&index_file_path(dir, base_offset), base_offset)?;
+        Ok(Segment {
+            base_offset,
+            path,
+            file,
+            index,
+            size: 0,
+            next_offset: base_offset,
+            max_timestamp: -1,
+            index_interval_bytes,
+            bytes_since_last_index_entry: 0,
+        })
     }
 
     /// Ouvre un segment existant. Les en-têtes des batches sont parcourus
@@ -43,7 +59,39 @@ impl Segment {
     ///
     /// Les CRC ne sont pas vérifiés : voir [`Segment::recover`].
     pub fn open(dir: &Path, base_offset: i64, index_interval_bytes: u64) -> io::Result<Segment> {
-        todo!("ch.4 : open")
+        let path = log_file_path(dir, base_offset);
+        let file = OpenOptions::new().read(true).append(true).open(&path)?;
+        let size = file.metadata()?.len();
+        let index_path = index_file_path(dir, base_offset);
+        let (index, rebuild) = match OffsetIndex::open(&index_path, base_offset, size)? {
+            Some(index) => (index, false),
+            None => {
+                tracing::info!(path = %index_path.display(), "index absent ou invalide, reconstruction");
+                (OffsetIndex::create(&index_path, base_offset)?, true)
+            }
+        };
+        let mut segment = Segment {
+            base_offset,
+            path,
+            file,
+            index,
+            size,
+            next_offset: base_offset,
+            max_timestamp: -1,
+            index_interval_bytes,
+            bytes_since_last_index_entry: 0,
+        };
+        // On s'arrête au premier en-tête illisible ou incomplet : s'il s'agit
+        // du dernier segment, `recover` supprimera la fin invalide.
+        let headers: Vec<_> = segment
+            .headers(0)
+            .map_while(Result::ok)
+            .take_while(|(position, header)| position + header.total_size() as u64 <= size)
+            .collect();
+        for (position, header) in headers {
+            segment.track(&header, position, rebuild)?;
+        }
+        Ok(segment)
     }
 
     /// Vérifie chaque batch du segment (taille, magic, CRC) et tronque le
@@ -52,24 +100,63 @@ impl Segment {
     ///
     /// Renvoie le nombre d'octets supprimés.
     pub fn recover(&mut self) -> io::Result<u64> {
-        todo!("ch.4 : recover")
+        let original_size = self.size;
+        self.index.truncate_to_position(0)?;
+        self.next_offset = self.base_offset;
+        self.max_timestamp = -1;
+        self.bytes_since_last_index_entry = 0;
+
+        let mut position = 0u64;
+        while position < original_size {
+            let Some(header) = self.read_valid_batch(position, original_size)? else { break };
+            self.track(&header, position, true)?;
+            position += header.total_size() as u64;
+        }
+        if position < original_size {
+            self.file.set_len(position)?;
+            self.size = position;
+        }
+        Ok(original_size - position)
     }
 
     /// Lit et valide entièrement le batch à `position`. `None` s'il est
     /// incomplet ou invalide.
     fn read_valid_batch(&self, position: u64, size: u64) -> io::Result<Option<RecordBatchHeader>> {
-        todo!("ch.4 : read_valid_batch")
+        if size - position < HEADER_SIZE as u64 {
+            return Ok(None);
+        }
+        let Ok(header) = self.read_header(position) else { return Ok(None) };
+        let total = header.total_size() as u64;
+        if header.magic != 2 || header.batch_length < (HEADER_SIZE - record_batch::LOG_OVERHEAD) as i32 || position + total > size {
+            return Ok(None);
+        }
+        let mut buf = vec![0u8; total as usize];
+        self.file.read_exact_at(&mut buf, position)?;
+        if record_batch::compute_crc(&buf) != header.crc {
+            return Ok(None);
+        }
+        Ok(Some(header))
     }
 
     /// Met à jour l'état du segment pour un batch situé à `position`, et
     /// ajoute une entrée d'index si besoin (et si `index` est vrai).
     fn track(&mut self, header: &RecordBatchHeader, position: u64, index: bool) -> io::Result<()> {
-        todo!("ch.4 : track")
+        if index && self.bytes_since_last_index_entry >= self.index_interval_bytes {
+            self.index.append(header.base_offset, position)?;
+            self.bytes_since_last_index_entry = 0;
+        }
+        self.bytes_since_last_index_entry += header.total_size() as u64;
+        self.next_offset = header.next_offset();
+        self.max_timestamp = self.max_timestamp.max(header.max_timestamp);
+        Ok(())
     }
 
     /// Ajoute un batch à la fin du fichier.
     pub fn append(&mut self, batch: &RecordBatch) -> io::Result<()> {
-        todo!("ch.4 : append")
+        let position = self.size;
+        self.file.write_all(&batch.bytes)?;
+        self.size += batch.bytes.len() as u64;
+        self.track(&batch.header, position, true)
     }
 
     /// Lit l'en-tête du batch qui commence à la position `position` du fichier.
@@ -105,12 +192,41 @@ impl Segment {
     ///
     /// L'index donne la position à partir de laquelle chercher.
     pub fn read(&self, offset: i64, max_bytes: usize, max_offset: i64) -> io::Result<Bytes> {
-        todo!("ch.4 : read")
+        let mut start = None;
+        let mut end = 0u64;
+        for entry in self.headers(self.index.lookup(offset)) {
+            let (position, header) = entry?;
+            if header.base_offset >= max_offset {
+                break;
+            }
+            if header.last_offset() < offset {
+                continue; // batch entièrement avant l'offset demandé
+            }
+            let batch_end = position + header.total_size() as u64;
+            match start {
+                None => start = Some(position),
+                Some(first) if (batch_end - first) as usize > max_bytes => break,
+                Some(_) => {}
+            }
+            end = batch_end;
+        }
+        let Some(start) = start else {
+            return Ok(Bytes::new());
+        };
+        let mut buf = vec![0u8; (end - start) as usize];
+        self.file.read_exact_at(&mut buf, start)?;
+        Ok(Bytes::from(buf))
     }
 
     /// Supprime les fichiers du segment.
     pub fn delete(self) -> io::Result<()> {
-        todo!("ch.4 : delete")
+        let index_path = self.index.path().to_path_buf();
+        drop(self.file);
+        std::fs::remove_file(&self.path)?;
+        match std::fs::remove_file(index_path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
 
     pub fn size(&self) -> u64 {

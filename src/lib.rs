@@ -9,10 +9,6 @@
 //! - [`log`] : le stockage sur disque d'une partition ;
 //! - [`replica`] : les partitions hébergées par ce broker et leurs logs.
 
-// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
-// certains imports, paramètres et fonctions ne servent pas encore.
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
-
 pub mod apis;
 pub mod handlers;
 pub mod log;
@@ -93,7 +89,19 @@ impl Broker {
     /// Crée le broker, en rechargeant les topics et les logs présents dans
     /// le répertoire de données.
     pub fn new(config: Config) -> std::io::Result<Self> {
-        todo!("ch.4 : new")
+        let replicas = replica::ReplicaManager::new(config.data_dir.clone(), config.log.clone());
+        let topics = topics::Topics::default();
+        for topic in replicas.load_existing()? {
+            tracing::info!(topic = %topic.name, partitions = topic.partitions.len(), "topic rechargé");
+            topics.restore(topic);
+        }
+        Ok(Self {
+            config,
+            topics,
+            replicas,
+            next_producer_id: AtomicI64::new(0),
+            shutdown: CancellationToken::new(),
+        })
     }
 
     /// Lance une tâche de fond, arrêtée automatiquement à l'arrêt du broker.

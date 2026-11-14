@@ -79,7 +79,7 @@ impl Replica {
     }
 
     pub fn apply_retention(&self, now_ms: i64) -> io::Result<usize> {
-        todo!("ch.4 : apply_retention")
+        self.log.lock().unwrap().apply_retention(now_ms)
     }
 
     pub fn log_end_offset(&self) -> i64 {
@@ -117,7 +117,18 @@ impl ReplicaManager {
     /// Ouvre (ou crée) la réplique locale d'une partition. Le fichier
     /// `partition.metadata` du répertoire mémorise l'identifiant du topic.
     pub fn open_replica(&self, topic: &str, topic_id: Uuid, partition: i32) -> io::Result<Arc<Replica>> {
-        todo!("ch.4 : open_replica")
+        let dir = self.data_dir.join(format!("{topic}-{partition}"));
+        let log = Log::open(&dir, self.log_config.clone())?;
+        std::fs::write(dir.join(PARTITION_METADATA), format!("version: 0\ntopic_id: {topic_id}\n"))?;
+        let replica = Arc::new(Replica {
+            topic: topic.to_string(),
+            topic_id,
+            partition,
+            log: Mutex::new(log),
+            new_data: self.new_data.clone(),
+        });
+        self.replicas.write().unwrap().insert((topic.to_string(), partition), replica.clone());
+        Ok(replica)
     }
 
     /// Recharge les répliques présentes dans le répertoire de données, et
@@ -127,7 +138,37 @@ impl ReplicaManager {
     /// `partition.metadata` est une réplique. Le nom du topic peut lui-même
     /// contenir des `-` : on coupe au dernier.
     pub fn load_existing(&self) -> io::Result<Vec<Topic>> {
-        todo!("ch.4 : load_existing")
+        let mut found: BTreeMap<String, (Uuid, Vec<i32>)> = BTreeMap::new();
+        if !self.data_dir.exists() {
+            return Ok(Vec::new());
+        }
+        for entry in std::fs::read_dir(&self.data_dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some((topic, partition)) = name.rsplit_once('-') else { continue };
+            let Ok(partition) = partition.parse::<i32>() else { continue };
+            let Ok(metadata) = std::fs::read_to_string(entry.path().join(PARTITION_METADATA)) else { continue };
+            let Some(topic_id) = metadata
+                .lines()
+                .find_map(|l| l.strip_prefix("topic_id: "))
+                .and_then(|id| Uuid::parse_str(id.trim()).ok())
+            else {
+                tracing::warn!(dir = %entry.path().display(), "partition.metadata invalide, répertoire ignoré");
+                continue;
+            };
+            found.entry(topic.to_string()).or_insert((topic_id, Vec::new())).1.push(partition);
+        }
+
+        let mut topics = Vec::new();
+        for (name, (id, mut partitions)) in found {
+            partitions.sort();
+            for &p in &partitions {
+                self.open_replica(&name, id, p)?;
+            }
+            let partitions = partitions.into_iter().map(|index| Partition { index }).collect();
+            topics.push(Topic { name, id, partitions });
+        }
+        Ok(topics)
     }
 
     pub fn all(&self) -> Vec<Arc<Replica>> {
@@ -136,7 +177,15 @@ impl ReplicaManager {
 
     /// Applique la rétention à toutes les répliques.
     pub fn apply_retention(&self) {
-        todo!("ch.4 : apply_retention")
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        for replica in self.all() {
+            if let Err(e) = replica.apply_retention(now_ms) {
+                tracing::error!(topic = %replica.topic, partition = replica.partition, "rétention impossible : {e}");
+            }
+        }
     }
 
     pub fn get(&self, topic: &str, partition: i32) -> Option<Arc<Replica>> {

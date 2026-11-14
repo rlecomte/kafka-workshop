@@ -92,7 +92,34 @@ impl Log {
     /// dernier segment est vérifié et tronqué au premier batch invalide
     /// (voir [`Segment::recover`]).
     pub fn open(dir: &Path, config: LogConfig) -> io::Result<Log> {
-        todo!("ch.4 : open")
+        std::fs::create_dir_all(dir)?;
+
+        let mut base_offsets = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let name = entry?.file_name();
+            let name = name.to_string_lossy();
+            if let Some(base) = name.strip_suffix(".log").and_then(|b| b.parse::<i64>().ok()) {
+                base_offsets.push(base);
+            }
+        }
+        base_offsets.sort();
+
+        let mut segments = BTreeMap::new();
+        for base in &base_offsets {
+            segments.insert(*base, Segment::open(dir, *base, config.index_interval_bytes)?);
+        }
+        if let Some(last) = segments.values_mut().next_back() {
+            let truncated = last.recover()?;
+            if truncated > 0 {
+                tracing::warn!(dir = %dir.display(), truncated, "fin de log invalide supprimée");
+            }
+        } else {
+            segments.insert(0, Segment::create(dir, 0, config.index_interval_bytes)?);
+        }
+
+        let next_offset = segments.values().next_back().unwrap().next_offset();
+        let log_start_offset = *segments.keys().next().unwrap();
+        Ok(Log { dir: dir.to_path_buf(), config, segments, next_offset, log_start_offset })
     }
 
     /// Ajoute des batches à la fin du log, en leur attribuant leurs offsets.
@@ -109,19 +136,46 @@ impl Log {
     /// Ajoute un batch dont l'offset est déjà attribué, en créant un nouveau
     /// segment si le segment actif est plein.
     fn append_batch(&mut self, batch: &RecordBatch) -> io::Result<()> {
-        todo!("ch.4 : append_batch")
+        let active = self.active_segment();
+        if active.size() > 0 && active.size() + batch.bytes.len() as u64 > self.config.segment_bytes {
+            self.roll()?;
+        }
+        self.active_segment().append(batch)?;
+        self.next_offset = batch.header.next_offset();
+        Ok(())
     }
 
     /// Crée un nouveau segment actif, qui commence au log end offset.
     fn roll(&mut self) -> io::Result<()> {
-        todo!("ch.4 : roll")
+        let segment = Segment::create(&self.dir, self.next_offset, self.config.index_interval_bytes)?;
+        tracing::debug!(dir = %self.dir.display(), base_offset = self.next_offset, "nouveau segment");
+        self.segments.insert(self.next_offset, segment);
+        Ok(())
     }
 
     /// Supprime les segments trop anciens ou en trop, selon `retention_ms` et
     /// `retention_bytes`. Le segment actif n'est jamais supprimé. Renvoie le
     /// nombre de segments supprimés.
     pub fn apply_retention(&mut self, now_ms: i64) -> io::Result<usize> {
-        todo!("ch.4 : apply_retention")
+        let mut deleted = 0;
+        let mut total_size: u64 = self.segments.values().map(|s| s.size()).sum();
+        while self.segments.len() > 1 {
+            let oldest = self.segments.values().next().unwrap();
+            let expired = self.config.retention_ms.is_some_and(|retention| {
+                oldest.max_timestamp() >= 0 && oldest.max_timestamp() < now_ms - retention
+            });
+            let too_big = self.config.retention_bytes.is_some_and(|max| total_size - oldest.size() >= max);
+            if !expired && !too_big {
+                break;
+            }
+            let (_, segment) = self.segments.pop_first().unwrap();
+            total_size -= segment.size();
+            tracing::info!(path = %segment.path().display(), expired, too_big, "segment supprimé par la rétention");
+            segment.delete()?;
+            deleted += 1;
+        }
+        self.log_start_offset = self.log_start_offset.max(*self.segments.keys().next().unwrap());
+        Ok(deleted)
     }
 
     /// Les segments, dans l'ordre.
