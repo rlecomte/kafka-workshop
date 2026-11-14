@@ -38,7 +38,9 @@ impl Segment {
 
     /// Lit l'en-tête du batch qui commence à la position `position` du fichier.
     pub fn read_header(&self, position: u64) -> io::Result<RecordBatchHeader> {
-        todo!("ch.3 : read_header")
+        let mut buf = [0u8; HEADER_SIZE];
+        self.file.read_exact_at(&mut buf, position)?;
+        RecordBatchHeader::parse(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Parcourt les en-têtes des batches du segment, à partir de la position
@@ -65,7 +67,30 @@ impl Segment {
     /// dépasser `max_bytes` (sauf pour le premier batch, toujours renvoyé en
     /// entier) ni inclure de batch commençant à `max_offset` ou au-delà.
     pub fn read(&self, offset: i64, max_bytes: usize, max_offset: i64) -> io::Result<Bytes> {
-        todo!("ch.3 : read")
+        let mut start = None;
+        let mut end = 0u64;
+        for entry in self.headers(0) {
+            let (position, header) = entry?;
+            if header.base_offset >= max_offset {
+                break;
+            }
+            if header.last_offset() < offset {
+                continue; // batch entièrement avant l'offset demandé
+            }
+            let batch_end = position + header.total_size() as u64;
+            match start {
+                None => start = Some(position),
+                Some(first) if (batch_end - first) as usize > max_bytes => break,
+                Some(_) => {}
+            }
+            end = batch_end;
+        }
+        let Some(start) = start else {
+            return Ok(Bytes::new());
+        };
+        let mut buf = vec![0u8; (end - start) as usize];
+        self.file.read_exact_at(&mut buf, start)?;
+        Ok(Bytes::from(buf))
     }
 
     pub fn size(&self) -> u64 {

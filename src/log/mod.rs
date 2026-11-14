@@ -101,13 +101,38 @@ impl Log {
     ///
     /// Un offset égal au log end offset est valide : la lecture est vide.
     pub fn read(&self, offset: i64, max_bytes: usize, max_offset: i64) -> Result<Bytes, ReadError> {
-        todo!("ch.3 : read")
+        if offset < self.log_start_offset || offset > self.next_offset {
+            return Err(ReadError::OffsetOutOfRange {
+                offset,
+                log_start_offset: self.log_start_offset,
+                log_end_offset: self.next_offset,
+            });
+        }
+        // Le segment qui contient l'offset est le dernier dont l'offset de
+        // base est inférieur ou égal. Comme Kafka, on ne lit que dans un seul
+        // segment par requête. Si l'offset est tout à la fin d'un segment, la
+        // lecture est vide et on passe au suivant.
+        for (_, segment) in self.segments.range(..=offset).next_back().into_iter().chain(self.segments.range(offset + 1..)) {
+            let bytes = segment.read(offset, max_bytes, max_offset)?;
+            if !bytes.is_empty() {
+                return Ok(bytes);
+            }
+        }
+        Ok(Bytes::new())
     }
 
     /// Le premier offset dont le batch a un timestamp supérieur ou égal à
     /// `timestamp` (à la granularité du batch), ou `None`.
     pub fn offset_for_timestamp(&self, timestamp: i64) -> io::Result<Option<i64>> {
-        todo!("ch.3 : offset_for_timestamp")
+        for segment in self.segments.values() {
+            for entry in segment.headers(0) {
+                let (_, header) = entry?;
+                if header.max_timestamp >= timestamp {
+                    return Ok(Some(header.base_offset.max(self.log_start_offset)));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn log_end_offset(&self) -> i64 {

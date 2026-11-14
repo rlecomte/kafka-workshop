@@ -16,10 +16,39 @@ pub const EARLIEST_TIMESTAMP: i64 = -2;
 
 impl Broker {
     pub(super) fn handle_list_offsets(&self, request: ListOffsetsRequest) -> ListOffsetsResponse {
-        todo!("ch.3 : handle_list_offsets")
+        let topics = request
+            .topics
+            .into_iter()
+            .map(|topic| {
+                let partitions =
+                    topic.partitions.iter().map(|p| self.list_offset(topic.name.as_str(), p)).collect();
+                ListOffsetsTopicResponse::default().with_name(topic.name).with_partitions(partitions)
+            })
+            .collect();
+        ListOffsetsResponse::default().with_topics(topics)
     }
 
     fn list_offset(&self, topic: &str, p: &ListOffsetsPartition) -> ListOffsetsPartitionResponse {
-        todo!("ch.3 : list_offset")
+        let response = ListOffsetsPartitionResponse::default().with_partition_index(p.partition_index);
+        let Some(replica) = self.replicas.get(topic, p.partition_index) else {
+            return response.with_error_code(ResponseError::UnknownTopicOrPartition.code());
+        };
+        let offset = match p.timestamp {
+            LATEST_TIMESTAMP => Some(replica.high_watermark()),
+            EARLIEST_TIMESTAMP => Some(replica.log_start_offset()),
+            timestamp if timestamp >= 0 => match replica.offset_for_timestamp(timestamp) {
+                Ok(offset) => offset,
+                Err(_) => return response.with_error_code(ResponseError::KafkaStorageError.code()),
+            },
+            other => {
+                tracing::debug!(topic, timestamp = other, "timestamp spécial non supporté");
+                return response.with_error_code(ResponseError::InvalidRequest.code());
+            }
+        };
+        match offset {
+            Some(offset) => response.with_offset(offset).with_timestamp(-1),
+            // Aucun message assez récent : offset et timestamp inconnus.
+            None => response.with_offset(-1).with_timestamp(-1),
+        }
     }
 }

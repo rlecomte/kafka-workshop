@@ -48,22 +48,30 @@ pub struct AppendInfo {
 
 impl Replica {
     pub fn append(&self, batches: Vec<RecordBatch>) -> io::Result<AppendInfo> {
-        todo!("ch.3 : append")
+        let mut log = self.log.lock().unwrap();
+        let base_offset = log.append(batches)?;
+        let info = AppendInfo { base_offset, log_start_offset: log.log_start_offset() };
+        drop(log);
+        self.new_data.notify_waiters();
+        Ok(info)
     }
 
     /// Lit des batches à partir de `offset`, sans dépasser le high watermark.
     pub fn read(&self, offset: i64, max_bytes: usize) -> Result<FetchData, ReadError> {
-        todo!("ch.3 : read")
+        let log = self.log.lock().unwrap();
+        let high_watermark = log.log_end_offset();
+        let records = log.read(offset, max_bytes, high_watermark)?;
+        Ok(FetchData { records, high_watermark, log_start_offset: log.log_start_offset() })
     }
 
     /// Le high watermark : le dernier offset (exclu) visible par les
     /// consumers. Avec une seule réplique, c'est le log end offset.
     pub fn high_watermark(&self) -> i64 {
-        todo!("ch.3 : high_watermark")
+        self.log.lock().unwrap().log_end_offset()
     }
 
     pub fn offset_for_timestamp(&self, timestamp: i64) -> std::io::Result<Option<i64>> {
-        todo!("ch.3 : offset_for_timestamp")
+        self.log.lock().unwrap().offset_for_timestamp(timestamp)
     }
 
     pub fn log_end_offset(&self) -> i64 {
