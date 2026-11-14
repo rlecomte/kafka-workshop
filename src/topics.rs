@@ -1,7 +1,8 @@
-//! Le registre des topics du broker.
+//! Le registre des topics du cluster, tel que ce broker le connaît.
 //!
-//! Pour l'instant, un topic n'est qu'un nom, un identifiant et une liste de
-//! partitions vides. Les partitions recevront leur log au chapitre 2.
+//! En mode autonome, le broker est seul : il crée les topics lui-même, et il
+//! est leader et unique réplique de toutes les partitions. En mode cluster,
+//! le registre est une copie de l'état stocké dans etcd (voir [`crate::cluster`]).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -21,9 +22,24 @@ pub struct Topic {
     pub partitions: Vec<Partition>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
     pub index: i32,
+    /// Les brokers qui ont une réplique de la partition.
+    pub replicas: Vec<i32>,
+    /// Le broker leader, ou -1 s'il n'y en a pas.
+    pub leader: i32,
+    /// Incrémenté à chaque changement de leader.
+    pub leader_epoch: i32,
+    /// Les répliques à jour (in-sync replicas).
+    pub isr: Vec<i32>,
+}
+
+impl Partition {
+    /// Une partition dont `node_id` est l'unique réplique (mode autonome).
+    pub fn local(index: i32, node_id: i32) -> Partition {
+        Partition { index, replicas: vec![node_id], leader: node_id, leader_epoch: 0, isr: vec![node_id] }
+    }
 }
 
 /// Les raisons pour lesquelles une création de topic peut échouer.
@@ -35,6 +51,8 @@ pub enum TopicError {
     AlreadyExists(String),
     /// Erreur d'entrée-sortie lors de la création des logs.
     Storage(String),
+    /// etcd injoignable (mode cluster).
+    Unavailable(String),
 }
 
 impl TopicError {
@@ -46,6 +64,7 @@ impl TopicError {
             TopicError::InvalidReplicationFactor(_) => ResponseError::InvalidReplicationFactor,
             TopicError::AlreadyExists(_) => ResponseError::TopicAlreadyExists,
             TopicError::Storage(_) => ResponseError::KafkaStorageError,
+            TopicError::Unavailable(_) => ResponseError::RequestTimedOut,
         }
     }
 }
@@ -60,6 +79,7 @@ impl std::fmt::Display for TopicError {
             }
             TopicError::AlreadyExists(name) => write!(f, "le topic {name} existe déjà"),
             TopicError::Storage(e) => write!(f, "erreur de stockage : {e}"),
+            TopicError::Unavailable(e) => write!(f, "cluster indisponible : {e}"),
         }
     }
 }
@@ -80,12 +100,19 @@ pub struct NewTopic {
 /// Un `BTreeMap` garde les topics triés par nom, ce qui rend les listings
 /// stables. Le verrou est un `std::sync::RwLock` : on ne le garde jamais
 /// pendant un `.await`, donc pas besoin d'un verrou asynchrone.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Topics {
+    /// L'identifiant de ce broker, réplique de tous les topics créés
+    /// localement.
+    node_id: i32,
     topics: RwLock<BTreeMap<String, Arc<Topic>>>,
 }
 
 impl Topics {
+    pub fn new(node_id: i32) -> Topics {
+        Topics { node_id, topics: RwLock::default() }
+    }
+
     /// Vérifie qu'un topic peut être créé, et le crée sauf si `validate_only`.
     /// Renvoie le topic (créé, ou tel qu'il aurait été créé).
     pub fn create(&self, new: NewTopic, validate_only: bool) -> Result<Arc<Topic>, TopicError> {
@@ -105,7 +132,7 @@ impl Topics {
         let topic = Arc::new(Topic {
             name: new.name.clone(),
             id: Uuid::new_v4(),
-            partitions: (0..new.num_partitions).map(|index| Partition { index }).collect(),
+            partitions: (0..new.num_partitions).map(|index| Partition::local(index, self.node_id)).collect(),
         });
         if !validate_only {
             topics.insert(new.name, topic.clone());
@@ -116,6 +143,12 @@ impl Topics {
     /// Réenregistre un topic existant (rechargé depuis le disque).
     pub fn restore(&self, topic: Topic) {
         self.topics.write().unwrap().insert(topic.name.clone(), Arc::new(topic));
+    }
+
+    /// Remplace tout le registre (mode cluster : nouvel état lu dans etcd).
+    pub fn replace_all(&self, topics: Vec<Topic>) {
+        let topics = topics.into_iter().map(|t| (t.name.clone(), Arc::new(t))).collect();
+        *self.topics.write().unwrap() = topics;
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<Topic>> {

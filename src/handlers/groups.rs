@@ -43,6 +43,9 @@ impl Broker {
         if group_id.is_empty() {
             return join_response(JoinResult::error(ResponseError::InvalidGroupId, &member_id), ctx.version);
         }
+        if !self.is_coordinator(&group_id) {
+            return join_response(JoinResult::error(ResponseError::NotCoordinator, &member_id), ctx.version);
+        }
         // La v0 n'a pas de rebalance_timeout (-1) : c'est alors le session_timeout.
         let rebalance_timeout_ms =
             if request.rebalance_timeout_ms < 0 { request.session_timeout_ms } else { request.rebalance_timeout_ms };
@@ -73,6 +76,9 @@ impl Broker {
     pub(super) async fn handle_sync_group(&self, request: SyncGroupRequest) -> SyncGroupResponse {
         let group_id = request.group_id.to_string();
         let member_id = request.member_id.to_string();
+        if !self.is_coordinator(&group_id) {
+            return SyncGroupResponse::default().with_error_code(ResponseError::NotCoordinator.code());
+        }
         let assignments = request.assignments.iter().map(|a| (a.member_id.to_string(), a.assignment.clone())).collect();
 
         let outcome = self.groups.with_existing_group(&group_id, |group, _, now| {
@@ -94,6 +100,9 @@ impl Broker {
     }
 
     pub(super) fn handle_heartbeat(&self, request: HeartbeatRequest) -> HeartbeatResponse {
+        if !self.is_coordinator(&request.group_id) {
+            return HeartbeatResponse::default().with_error_code(ResponseError::NotCoordinator.code());
+        }
         let result = self
             .groups
             .with_existing_group(&request.group_id, |group, _, now| {
@@ -104,6 +113,9 @@ impl Broker {
     }
 
     pub(super) fn handle_leave_group(&self, request: LeaveGroupRequest, ctx: &RequestContext) -> LeaveGroupResponse {
+        if !self.is_coordinator(&request.group_id) {
+            return LeaveGroupResponse::default().with_error_code(ResponseError::NotCoordinator.code());
+        }
         // Jusqu'à la v2, un seul membre ; à partir de la v3, une liste.
         let member_ids: Vec<StrBytes> = if ctx.version >= 3 {
             request.members.iter().map(|m| m.member_id.clone()).collect()

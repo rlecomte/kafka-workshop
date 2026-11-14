@@ -49,8 +49,9 @@ impl Broker {
         if !matches!(acks, -1..=1) {
             return error(ResponseError::InvalidRequiredAcks, format!("acks={acks} invalide"));
         }
-        let Some(replica) = self.replicas.get(topic, data.index) else {
-            return error(ResponseError::UnknownTopicOrPartition, format!("{topic}-{} inconnue", data.index));
+        let replica = match self.leader_replica(topic, data.index) {
+            Ok(replica) => replica,
+            Err(e) => return error(e, format!("{topic}-{} : pas leader ici", data.index)),
         };
         let Some(records) = data.records else {
             return error(ResponseError::CorruptMessage, "champ records absent".into());

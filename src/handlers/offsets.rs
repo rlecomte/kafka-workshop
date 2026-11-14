@@ -31,9 +31,13 @@ fn now_ms() -> i64 {
 impl Broker {
     pub(super) async fn handle_offset_commit(&self, request: OffsetCommitRequest) -> OffsetCommitResponse {
         let group_id = request.group_id.to_string();
-        let check = self.groups.with_group(&group_id, |group, _, now| {
-            group.check_commit(&request.member_id, request.generation_id_or_member_epoch, now)
-        });
+        let check = if !self.is_coordinator(&group_id) {
+            Err(ResponseError::NotCoordinator)
+        } else {
+            self.groups.with_group(&group_id, |group, _, now| {
+                group.check_commit(&request.member_id, request.generation_id_or_member_epoch, now)
+            })
+        };
 
         // Une erreur par partition : celle du groupe, ou celle de la partition.
         let mut commits = Vec::new();
@@ -43,7 +47,9 @@ impl Broker {
             for p in &topic.partitions {
                 let error = match check {
                     Err(e) => Some(e),
-                    Ok(()) if self.replicas.get(&topic.name, p.partition_index).is_none() => {
+                    // La partition doit exister dans le cluster (pas forcément
+                    // sur ce broker).
+                    Ok(()) if !self.topics.get(&topic.name).is_some_and(|t| t.partitions.iter().any(|x| x.index == p.partition_index)) => {
                         Some(ResponseError::UnknownTopicOrPartition)
                     }
                     Ok(()) => {
@@ -64,7 +70,7 @@ impl Broker {
         }
 
         if !commits.is_empty()
-            && let Err(e) = self.store_commits(&group_id, &commits)
+            && let Err(e) = self.store_commits(&group_id, &commits).await
         {
             tracing::error!(group = %group_id, "écriture des offsets impossible : {e}");
             for (_, partitions) in &mut results {
@@ -92,13 +98,12 @@ impl Broker {
     }
 
     /// Écrit des commits dans `__consumer_offsets`, puis les applique en mémoire.
-    fn store_commits(&self, group_id: &str, commits: &[(OffsetKey, OffsetValue)]) -> anyhow::Result<()> {
-        let topic = self.ensure_offsets_topic()?;
+    async fn store_commits(&self, group_id: &str, commits: &[(OffsetKey, OffsetValue)]) -> anyhow::Result<()> {
+        let topic = self.ensure_offsets_topic().await?;
         let partition = offsets::partition_for(group_id, topic.partitions.len() as i32);
         let replica = self
-            .replicas
-            .get(OFFSETS_TOPIC, partition)
-            .ok_or_else(|| anyhow::anyhow!("partition {partition} de {OFFSETS_TOPIC} absente"))?;
+            .leader_replica(OFFSETS_TOPIC, partition)
+            .map_err(|e| anyhow::anyhow!("partition {partition} de {OFFSETS_TOPIC} : {e:?}"))?;
         let batches = record_batch::parse_batches(offsets::encode_commits(commits))?;
         replica.append(batches)?;
         self.groups.apply_commits(commits.to_vec());
@@ -107,6 +112,9 @@ impl Broker {
 
     pub(super) fn handle_offset_fetch(&self, request: OffsetFetchRequest, ctx: &RequestContext) -> OffsetFetchResponse {
         if ctx.version < 8 {
+            if !self.is_coordinator(&request.group_id) {
+                return OffsetFetchResponse::default().with_error_code(ResponseError::NotCoordinator.code());
+            }
             // Un seul groupe.
             let requested = request
                 .topics
@@ -136,6 +144,11 @@ impl Broker {
             .groups
             .into_iter()
             .map(|g| {
+                if !self.is_coordinator(&g.group_id) {
+                    return OffsetFetchResponseGroup::default()
+                        .with_group_id(g.group_id)
+                        .with_error_code(ResponseError::NotCoordinator.code());
+                }
                 let requested = g.topics.map(|topics| topics.into_iter().map(|t| (t.name, t.partition_indexes)).collect());
                 let topics = self
                     .fetch_offsets(&g.group_id, requested)

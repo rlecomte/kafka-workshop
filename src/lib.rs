@@ -8,9 +8,15 @@
 //! - [`record_batch`] : le format binaire des batches de messages ;
 //! - [`log`] : le stockage sur disque d'une partition ;
 //! - [`replica`] : les partitions hébergées par ce broker et leurs logs ;
-//! - [`groups`] : le coordinateur des consumer groups et leurs offsets.
+//! - [`groups`] : le coordinateur des consumer groups et leurs offsets ;
+//! - [`cluster`] : le mode cluster, coordonné par etcd.
+
+// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
+// certains imports, paramètres et fonctions ne servent pas encore.
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 
 pub mod apis;
+pub mod cluster;
 pub mod groups;
 pub mod handlers;
 pub mod log;
@@ -59,6 +65,8 @@ pub struct Config {
     /// Nombre de partitions de `__consumer_offsets`
     /// (`offsets.topic.num.partitions`, 50 dans Kafka).
     pub offsets_topic_partitions: i32,
+    /// Mode cluster (coordonné par etcd), ou `None` pour un broker autonome.
+    pub cluster: Option<cluster::ClusterConfig>,
 }
 
 impl Default for Config {
@@ -76,13 +84,13 @@ impl Default for Config {
             retention_check_interval: Duration::from_secs(300),
             group: groups::group::GroupConfig::default(),
             offsets_topic_partitions: 10,
+            cluster: None,
         }
     }
 }
 
 /// L'état partagé du broker. Il est enveloppé dans un `Arc` et partagé
-/// entre toutes les connexions. Il s'enrichira au fil des chapitres
-/// (logs, groupes de consommateurs, client etcd...).
+/// entre toutes les connexions.
 #[derive(Debug)]
 pub struct Broker {
     pub config: Config,
@@ -93,59 +101,51 @@ pub struct Broker {
     /// Annulé à l'arrêt du broker : toutes les tâches de fond s'arrêtent.
     pub shutdown: CancellationToken,
     pub groups: groups::GroupCoordinator,
+    /// L'état du cluster, en mode cluster.
+    pub cluster: Option<cluster::node::ClusterNode>,
 }
 
 impl Broker {
-    /// Crée le broker, en rechargeant les topics et les logs présents dans
-    /// le répertoire de données.
+    /// Crée le broker. En mode autonome, les topics et les logs présents dans
+    /// le répertoire de données sont rechargés. En mode cluster, les topics
+    /// viendront d'etcd (voir [`Broker::start`]).
     pub fn new(config: Config) -> std::io::Result<Self> {
         let replicas = replica::ReplicaManager::new(config.data_dir.clone(), config.log.clone());
-        let topics = topics::Topics::default();
-        for topic in replicas.load_existing()? {
-            tracing::info!(topic = %topic.name, partitions = topic.partitions.len(), "topic rechargé");
-            topics.restore(topic);
+        let topics = topics::Topics::new(config.node_id);
+        if config.cluster.is_none() {
+            for topic in replicas.load_existing(config.node_id)? {
+                tracing::info!(topic = %topic.name, partitions = topic.partitions.len(), "topic rechargé");
+                topics.restore(topic);
+            }
         }
         let broker = Self {
             groups: groups::GroupCoordinator::new(config.group.clone()),
+            cluster: config.cluster.clone().map(cluster::node::ClusterNode::new),
             config,
             topics,
             replicas,
             next_producer_id: AtomicI64::new(0),
             shutdown: CancellationToken::new(),
         };
-        broker.load_offsets()?;
+        if broker.cluster.is_none()
+            && let Some(topic) = broker.topics.get(groups::offsets::OFFSETS_TOPIC)
+        {
+            for partition in &topic.partitions {
+                broker.load_offsets_partition(partition.index)?;
+            }
+        }
         Ok(broker)
     }
 
-    /// Relit `__consumer_offsets` pour retrouver les offsets commités.
-    fn load_offsets(&self) -> std::io::Result<()> {
-        let Some(topic) = self.topics.get(groups::offsets::OFFSETS_TOPIC) else { return Ok(()) };
-        for partition in &topic.partitions {
-            if let Some(replica) = self.replicas.get(&topic.name, partition.index) {
-                let commits = groups::offsets::decode_commits(replica.read_all()?);
-                tracing::info!(partition = partition.index, commits = commits.len(), "offsets rechargés");
-                self.groups.apply_commits(commits);
-            }
+    /// Relit une partition de `__consumer_offsets` pour retrouver les offsets
+    /// commités qu'elle contient.
+    pub(crate) fn load_offsets_partition(&self, partition: i32) -> std::io::Result<()> {
+        if let Some(replica) = self.replicas.get(groups::offsets::OFFSETS_TOPIC, partition) {
+            let commits = groups::offsets::decode_commits(replica.read_all()?);
+            tracing::info!(partition, commits = commits.len(), "offsets rechargés");
+            self.groups.apply_commits(commits);
         }
         Ok(())
-    }
-
-    /// Crée `__consumer_offsets` s'il n'existe pas encore.
-    pub fn ensure_offsets_topic(&self) -> Result<Arc<Topic>, TopicError> {
-        if let Some(topic) = self.topics.get(groups::offsets::OFFSETS_TOPIC) {
-            return Ok(topic);
-        }
-        let new = NewTopic {
-            name: groups::offsets::OFFSETS_TOPIC.to_string(),
-            num_partitions: self.config.offsets_topic_partitions,
-            replication_factor: 1,
-        };
-        match self.create_topic(new, false) {
-            Err(TopicError::AlreadyExists(_)) => {
-                Ok(self.topics.get(groups::offsets::OFFSETS_TOPIC).expect("créé entre-temps"))
-            }
-            other => other,
-        }
     }
 
     /// Lance une tâche de fond, arrêtée automatiquement à l'arrêt du broker.
@@ -159,8 +159,8 @@ impl Broker {
         });
     }
 
-    /// Lance les tâches de fond du broker.
-    pub fn start_background_tasks(self: &Arc<Self>) {
+    /// Démarre le broker : tâches de fond et, en mode cluster, connexion à etcd.
+    pub async fn start(self: &Arc<Self>) -> anyhow::Result<()> {
         let broker = self.clone();
         self.spawn(async move {
             let mut interval = tokio::time::interval(broker.config.retention_check_interval);
@@ -178,18 +178,57 @@ impl Broker {
                 broker.groups.tick();
             }
         });
+
+        if self.cluster.is_some() {
+            self.join_cluster().await?;
+        }
+        Ok(())
     }
 
-    /// Crée un topic : l'enregistre dans le registre, puis crée les logs de
-    /// ses partitions sur disque.
-    pub fn create_topic(&self, new: NewTopic, validate_only: bool) -> Result<Arc<Topic>, TopicError> {
-        let topic = self.topics.create(new, validate_only)?;
-        if !validate_only {
-            self.replicas.create_replicas(&topic).map_err(|e| {
-                tracing::error!(topic = %topic.name, "impossible de créer les logs : {e}");
-                TopicError::Storage(e.to_string())
-            })?;
-        }
-        Ok(topic)
+    // -----------------------------------------------------------------------
+    // Vue du cluster, identique en mode autonome et en mode cluster
+    // -----------------------------------------------------------------------
+
+    /// Les brokers vivants, triés par identifiant.
+    pub fn live_brokers(&self) -> Vec<cluster::BrokerRecord> {
+        todo!("ch.6 : live_brokers")
+    }
+
+    /// Le controller, ou -1 s'il n'y en a pas.
+    pub fn controller_id(&self) -> i32 {
+        todo!("ch.6 : controller_id")
+    }
+
+    /// La réplique locale d'une partition dont ce broker est le leader.
+    pub fn leader_replica(&self, topic: &str, partition: i32) -> Result<Arc<replica::Replica>, kafka_protocol::ResponseError> {
+        todo!("ch.6 : leader_replica")
+    }
+
+    /// Le coordinateur d'un groupe : le leader de sa partition de
+    /// `__consumer_offsets`. Renvoie la partition et le leader (-1 si aucun).
+    pub fn coordinator_for(&self, group_id: &str) -> Option<(i32, i32)> {
+        todo!("ch.6 : coordinator_for")
+    }
+
+    /// Ce broker est-il le coordinateur de ce groupe (et ses offsets sont-ils
+    /// chargés) ? Un broker autonome coordonne tous les groupes.
+    pub fn is_coordinator(&self, group_id: &str) -> bool {
+        todo!("ch.6 : is_coordinator")
+    }
+
+    // -----------------------------------------------------------------------
+    // Création des topics
+    // -----------------------------------------------------------------------
+
+    /// Crée un topic. En mode autonome : l'enregistre dans le registre, puis
+    /// crée les logs de ses partitions. En mode cluster : l'écrit dans etcd.
+    pub async fn create_topic(&self, new: NewTopic, validate_only: bool) -> Result<Arc<Topic>, TopicError> {
+        todo!("ch.6 : create_topic")
+    }
+
+    /// Crée `__consumer_offsets` s'il n'existe pas encore, avec 3 répliques
+    /// au plus (`offsets.topic.replication.factor`).
+    pub async fn ensure_offsets_topic(&self) -> Result<Arc<Topic>, TopicError> {
+        todo!("ch.6 : ensure_offsets_topic")
     }
 }

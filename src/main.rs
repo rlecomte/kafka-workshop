@@ -56,6 +56,21 @@ async fn main() -> anyhow::Result<()> {
             ..defaults.group
         },
         offsets_topic_partitions: env_or("BROKER_OFFSETS_TOPIC_PARTITIONS", defaults.offsets_topic_partitions)?,
+        // Mode cluster si BROKER_ETCD_URL est défini (par exemple http://localhost:2379).
+        cluster: match std::env::var("BROKER_ETCD_URL") {
+            Ok(etcd_url) => {
+                let cluster_defaults = broker::cluster::ClusterConfig::default();
+                Some(broker::cluster::ClusterConfig {
+                    etcd_url,
+                    prefix: env_or("BROKER_ETCD_PREFIX", cluster_defaults.prefix)?,
+                    lease_ttl: std::time::Duration::from_secs(env_or(
+                        "BROKER_LEASE_TTL_SECS",
+                        cluster_defaults.lease_ttl.as_secs(),
+                    )?),
+                })
+            }
+            Err(_) => None,
+        },
     };
 
     let listener = TcpListener::bind(("0.0.0.0", config.port))

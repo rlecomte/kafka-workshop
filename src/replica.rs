@@ -169,7 +169,7 @@ impl ReplicaManager {
     /// Chaque sous-répertoire `<topic>-<partition>` contenant un fichier
     /// `partition.metadata` est une réplique. Le nom du topic peut lui-même
     /// contenir des `-` : on coupe au dernier.
-    pub fn load_existing(&self) -> io::Result<Vec<Topic>> {
+    pub fn load_existing(&self, node_id: i32) -> io::Result<Vec<Topic>> {
         let mut found: BTreeMap<String, (Uuid, Vec<i32>)> = BTreeMap::new();
         if !self.data_dir.exists() {
             return Ok(Vec::new());
@@ -197,7 +197,7 @@ impl ReplicaManager {
             for &p in &partitions {
                 self.open_replica(&name, id, p)?;
             }
-            let partitions = partitions.into_iter().map(|index| Partition { index }).collect();
+            let partitions = partitions.into_iter().map(|index| Partition::local(index, node_id)).collect();
             topics.push(Topic { name, id, partitions });
         }
         Ok(topics)

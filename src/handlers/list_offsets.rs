@@ -30,8 +30,9 @@ impl Broker {
 
     fn list_offset(&self, topic: &str, p: &ListOffsetsPartition) -> ListOffsetsPartitionResponse {
         let response = ListOffsetsPartitionResponse::default().with_partition_index(p.partition_index);
-        let Some(replica) = self.replicas.get(topic, p.partition_index) else {
-            return response.with_error_code(ResponseError::UnknownTopicOrPartition.code());
+        let replica = match self.leader_replica(topic, p.partition_index) {
+            Ok(replica) => replica,
+            Err(e) => return response.with_error_code(e.code()),
         };
         let offset = match p.timestamp {
             LATEST_TIMESTAMP => Some(replica.high_watermark()),

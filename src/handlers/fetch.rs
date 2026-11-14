@@ -75,8 +75,9 @@ impl Broker {
 
     fn fetch_partition(&self, topic: &str, p: &FetchPartition, max_bytes: usize) -> PartitionData {
         let data = PartitionData::default().with_partition_index(p.partition);
-        let Some(replica) = self.replicas.get(topic, p.partition) else {
-            return data.with_error_code(ResponseError::UnknownTopicOrPartition.code()).with_high_watermark(-1);
+        let replica = match self.leader_replica(topic, p.partition) {
+            Ok(replica) => replica,
+            Err(e) => return data.with_error_code(e.code()).with_high_watermark(-1),
         };
         match replica.read(p.fetch_offset, max_bytes) {
             Ok(read) => data

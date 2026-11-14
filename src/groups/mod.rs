@@ -52,6 +52,12 @@ impl GroupCoordinator {
         }
     }
 
+    /// Oublie les groupes pour lesquels `belongs` est vrai (ce broker n'en est
+    /// plus le coordinateur).
+    pub fn unload(&self, belongs: impl Fn(&str) -> bool) {
+        self.groups.lock().unwrap().retain(|id, _| !belongs(id));
+    }
+
     /// Gère les échéances de tous les groupes, et oublie les groupes morts.
     pub fn tick(&self) {
         let now = Instant::now();

@@ -42,6 +42,11 @@ impl Broker {
             .groups
             .into_iter()
             .map(|group_id| {
+                if !self.is_coordinator(&group_id) {
+                    return DescribedGroup::default()
+                        .with_group_id(group_id)
+                        .with_error_code(kafka_protocol::ResponseError::NotCoordinator.code());
+                }
                 self.groups
                     .with_existing_group(&group_id, |group, _, _| {
                         let protocol = group.protocol_name.clone().unwrap_or_default();

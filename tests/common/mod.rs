@@ -5,6 +5,7 @@
 //! pour encoder les requêtes et décoder les réponses.
 #![allow(dead_code)]
 
+pub mod cluster;
 pub mod groups;
 
 use std::net::SocketAddr;

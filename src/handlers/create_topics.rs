@@ -12,16 +12,11 @@ use crate::Broker;
 use crate::topics::NewTopic;
 
 impl Broker {
-    pub(super) fn handle_create_topics(&self, request: CreateTopicsRequest) -> CreateTopicsResponse {
-        let topics = request
-            .topics
-            .into_iter()
-            .map(|topic| self.create_one_topic(topic, request.validate_only))
-            .collect();
-        CreateTopicsResponse::default().with_topics(topics)
+    pub(super) async fn handle_create_topics(&self, request: CreateTopicsRequest) -> CreateTopicsResponse {
+        todo!("ch.6 : handle_create_topics")
     }
 
-    fn create_one_topic(&self, topic: CreatableTopic, validate_only: bool) -> CreatableTopicResult {
+    async fn create_one_topic(&self, topic: CreatableTopic, validate_only: bool) -> CreatableTopicResult {
         let name = topic.name.clone();
         let result = CreatableTopicResult::default().with_name(name.clone());
 
@@ -47,7 +42,7 @@ impl Broker {
         };
         let new = NewTopic { name: name.to_string(), num_partitions, replication_factor };
 
-        match self.create_topic(new, validate_only) {
+        match self.create_topic(new, validate_only).await {
             Ok(created) => {
                 tracing::info!(topic = %created.name, partitions = num_partitions, validate_only, "topic créé");
                 result

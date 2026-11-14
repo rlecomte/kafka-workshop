@@ -33,7 +33,7 @@ pub const MAX_FRAME_SIZE: usize = 100 * 1024 * 1024;
 /// les tâches de fond et ferme les connexions.
 pub async fn serve(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
     let _shutdown_on_exit = broker.shutdown.clone().drop_guard();
-    broker.start_background_tasks();
+    broker.start().await?;
     loop {
         let (socket, peer) = tokio::select! {
             accepted = listener.accept() => accepted?,

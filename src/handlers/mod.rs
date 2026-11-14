@@ -91,8 +91,8 @@ impl Broker {
 
         let response = match request {
             RequestKind::ApiVersions(req) => ResponseKind::ApiVersions(self.handle_api_versions(req)),
-            RequestKind::Metadata(req) => ResponseKind::Metadata(self.handle_metadata(req)),
-            RequestKind::CreateTopics(req) => ResponseKind::CreateTopics(self.handle_create_topics(req)),
+            RequestKind::Metadata(req) => ResponseKind::Metadata(self.handle_metadata(req).await),
+            RequestKind::CreateTopics(req) => ResponseKind::CreateTopics(self.handle_create_topics(req).await),
             RequestKind::DescribeConfigs(req) => ResponseKind::DescribeConfigs(self.handle_describe_configs(req)),
             RequestKind::Produce(req) => match self.handle_produce(req).await {
                 Some(response) => ResponseKind::Produce(response),
@@ -101,7 +101,7 @@ impl Broker {
             RequestKind::InitProducerId(req) => ResponseKind::InitProducerId(self.handle_init_producer_id(req)),
             RequestKind::Fetch(req) => ResponseKind::Fetch(self.handle_fetch(req).await),
             RequestKind::ListOffsets(req) => ResponseKind::ListOffsets(self.handle_list_offsets(req)),
-            RequestKind::FindCoordinator(req) => ResponseKind::FindCoordinator(self.handle_find_coordinator(req, &ctx)),
+            RequestKind::FindCoordinator(req) => ResponseKind::FindCoordinator(self.handle_find_coordinator(req, &ctx).await),
             RequestKind::JoinGroup(req) => ResponseKind::JoinGroup(self.handle_join_group(req, &ctx).await),
             RequestKind::SyncGroup(req) => ResponseKind::SyncGroup(self.handle_sync_group(req).await),
             RequestKind::Heartbeat(req) => ResponseKind::Heartbeat(self.handle_heartbeat(req)),
