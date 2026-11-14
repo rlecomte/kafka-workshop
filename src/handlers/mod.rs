@@ -23,7 +23,9 @@
 mod api_versions;
 mod create_topics;
 mod describe_configs;
+mod init_producer_id;
 mod metadata;
+mod produce;
 
 use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
@@ -35,11 +37,12 @@ use kafka_protocol::protocol::{Encodable, decode_request_header_from_buffer};
 use crate::{Broker, apis};
 
 impl Broker {
-    /// Traite une trame de requête et renvoie le contenu de la trame de réponse.
+    /// Traite une trame de requête et renvoie le contenu de la trame de réponse,
+    /// ou `None` si la requête n'appelle pas de réponse (Produce avec `acks = 0`).
     ///
     /// Renvoyer une erreur provoque la fermeture de la connexion : c'est ce
     /// que fait Kafka quand il reçoit une requête qu'il ne sait pas décoder.
-    pub async fn handle_request(&self, mut frame: Bytes) -> Result<Bytes> {
+    pub async fn handle_request(&self, mut frame: Bytes) -> Result<Option<Bytes>> {
         let header = decode_request_header_from_buffer(&mut frame)
             .context("request header illisible")?;
         let api_key = ApiKey::try_from(header.request_api_key)
@@ -55,7 +58,7 @@ impl Broker {
             // puisse se rabattre sur une version commune.
             if api_key == ApiKey::ApiVersions {
                 let response = api_versions::unsupported_version_response();
-                return encode_response(&header, ResponseKind::ApiVersions(response), 0);
+                return encode_response(&header, ResponseKind::ApiVersions(response), 0).map(Some);
             }
             bail!("API non supportée : {api_key:?} v{version}");
         }
@@ -68,10 +71,15 @@ impl Broker {
             RequestKind::Metadata(req) => ResponseKind::Metadata(self.handle_metadata(req)),
             RequestKind::CreateTopics(req) => ResponseKind::CreateTopics(self.handle_create_topics(req)),
             RequestKind::DescribeConfigs(req) => ResponseKind::DescribeConfigs(self.handle_describe_configs(req)),
+            RequestKind::Produce(req) => match self.handle_produce(req).await {
+                Some(response) => ResponseKind::Produce(response),
+                None => return Ok(None),
+            },
+            RequestKind::InitProducerId(req) => ResponseKind::InitProducerId(self.handle_init_producer_id(req)),
             other => bail!("pas de handler pour {other:?}"),
         };
 
-        encode_response(&header, response, version)
+        encode_response(&header, response, version).map(Some)
     }
 }
 

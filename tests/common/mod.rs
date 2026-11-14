@@ -24,6 +24,8 @@ pub const TIMEOUT: Duration = Duration::from_secs(5);
 /// Un broker lancé dans la même process que le test, sur un port libre.
 pub struct TestBroker {
     pub addr: SocketAddr,
+    /// Le répertoire de données, supprimé à la fin du test.
+    pub data_dir: Arc<tempfile::TempDir>,
     task: JoinHandle<Result<()>>,
 }
 
@@ -37,8 +39,14 @@ pub async fn start_broker() -> TestBroker {
     start_broker_with(Config::default()).await
 }
 
-/// Lance un broker avec une configuration donnée (host et port sont écrasés).
+/// Lance un broker avec une configuration donnée (host, port et data_dir
+/// sont écrasés).
 pub async fn start_broker_with(config: Config) -> TestBroker {
+    start_broker_in(config, Arc::new(tempfile::tempdir().unwrap())).await
+}
+
+/// Lance un broker qui stocke ses données dans `data_dir`.
+pub async fn start_broker_in(config: Config, data_dir: Arc<tempfile::TempDir>) -> TestBroker {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
@@ -48,9 +56,10 @@ pub async fn start_broker_with(config: Config) -> TestBroker {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let config = Config { host: "127.0.0.1".into(), port: addr.port(), ..config };
+    let config =
+        Config { host: "127.0.0.1".into(), port: addr.port(), data_dir: data_dir.path().to_path_buf(), ..config };
     let task = tokio::spawn(broker::server::serve(listener, Arc::new(Broker::new(config))));
-    TestBroker { addr, task }
+    TestBroker { addr, data_dir, task }
 }
 
 /// Un client Kafka minimal, une connexion TCP.
@@ -152,4 +161,96 @@ impl Client {
 /// Nom lisible d'une api_key, pour les messages d'erreur.
 pub fn api_name(key: i16) -> String {
     ApiKey::try_from(key).map(|k| format!("{k:?}")).unwrap_or_else(|_| key.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Topics et messages
+// ---------------------------------------------------------------------------
+
+use kafka_protocol::indexmap::IndexMap;
+use kafka_protocol::messages::create_topics_request::CreatableTopic;
+use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
+use kafka_protocol::messages::produce_response::PartitionProduceResponse;
+use kafka_protocol::messages::{CreateTopicsRequest, ProduceRequest, TopicName};
+use kafka_protocol::records::{
+    Compression, Record, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+};
+
+pub fn topic_name(name: &str) -> TopicName {
+    TopicName(StrBytes::from_string(name.to_string()))
+}
+
+/// Crée un topic et vérifie que la création a réussi.
+pub async fn create_topic(client: &mut Client, name: &str, partitions: i32) {
+    let request = CreateTopicsRequest::default().with_topics(vec![
+        CreatableTopic::default().with_name(topic_name(name)).with_num_partitions(partitions).with_replication_factor(-1),
+    ]);
+    let response = client.send(request, 7).await.unwrap();
+    assert_eq!(response.topics[0].error_code, 0, "création du topic {name}");
+}
+
+/// Un record avec une valeur (et une clé optionnelle).
+pub fn record(key: Option<&str>, value: &str) -> Record {
+    Record {
+        transactional: false,
+        control: false,
+        delete_horizon: false,
+        partition_leader_epoch: -1,
+        producer_id: -1,
+        producer_epoch: -1,
+        timestamp_type: TimestampType::Creation,
+        offset: 0,
+        sequence: -1,
+        timestamp: 1_700_000_000_000,
+        key: key.map(|k| Bytes::from(k.to_string())),
+        value: Some(Bytes::from(value.to_string())),
+        headers: IndexMap::new(),
+    }
+}
+
+/// Encode des records dans un batch v2, comme le ferait un producer.
+pub fn encode_batch(mut records: Vec<Record>, compression: Compression) -> Bytes {
+    // L'encodeur regroupe dans un même batch les records dont
+    // `offset - sequence` est constant.
+    for (i, r) in records.iter_mut().enumerate() {
+        r.offset = i as i64;
+        r.sequence = i as i32;
+    }
+    let mut buf = BytesMut::new();
+    RecordBatchEncoder::encode(&mut buf, &records, &RecordEncodeOptions { version: 2, compression }).unwrap();
+    buf.freeze()
+}
+
+/// Un batch non compressé contenant ces valeurs.
+pub fn batch(values: &[&str]) -> Bytes {
+    encode_batch(values.iter().map(|v| record(None, v)).collect(), Compression::None)
+}
+
+/// Décode des batches (réponse Fetch, fichier de log...) en records.
+pub fn decode_records(mut bytes: Bytes) -> Vec<Record> {
+    let mut records = Vec::new();
+    while !bytes.is_empty() {
+        let set = RecordBatchDecoder::decode(&mut bytes).expect("batch illisible");
+        records.extend(set.records);
+    }
+    records
+}
+
+/// Les valeurs des records, en texte.
+pub fn values(records: &[Record]) -> Vec<String> {
+    records.iter().map(|r| String::from_utf8_lossy(r.value.as_deref().unwrap_or_default()).into_owned()).collect()
+}
+
+pub fn produce_request(topic: &str, partition: i32, records: Bytes, acks: i16) -> ProduceRequest {
+    ProduceRequest::default().with_acks(acks).with_timeout_ms(5000).with_topic_data(vec![
+        TopicProduceData::default().with_name(topic_name(topic)).with_partition_data(vec![
+            PartitionProduceData::default().with_index(partition).with_records(Some(records)),
+        ]),
+    ])
+}
+
+/// Envoie un Produce (acks = -1) et renvoie la réponse de la partition.
+pub async fn produce(client: &mut Client, topic: &str, partition: i32, records: Bytes) -> PartitionProduceResponse {
+    let response = client.send(produce_request(topic, partition, records, -1), 9).await.unwrap();
+    response.responses[0].partition_responses[0].clone()
 }

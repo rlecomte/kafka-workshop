@@ -62,7 +62,7 @@ impl Broker {
                 num_partitions: self.config.default_num_partitions,
                 replication_factor: 1,
             };
-            match self.topics.create(new, false) {
+            match self.create_topic(new, false) {
                 Ok(topic) => {
                     tracing::info!(topic = %topic.name, "topic créé automatiquement");
                     return self.describe_topic(&topic);

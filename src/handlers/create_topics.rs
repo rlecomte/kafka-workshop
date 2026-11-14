@@ -16,12 +16,12 @@ impl Broker {
         let topics = request
             .topics
             .into_iter()
-            .map(|topic| self.create_topic(topic, request.validate_only))
+            .map(|topic| self.create_one_topic(topic, request.validate_only))
             .collect();
         CreateTopicsResponse::default().with_topics(topics)
     }
 
-    fn create_topic(&self, topic: CreatableTopic, validate_only: bool) -> CreatableTopicResult {
+    fn create_one_topic(&self, topic: CreatableTopic, validate_only: bool) -> CreatableTopicResult {
         let name = topic.name.clone();
         let result = CreatableTopicResult::default().with_name(name.clone());
 
@@ -47,7 +47,7 @@ impl Broker {
         };
         let new = NewTopic { name: name.to_string(), num_partitions, replication_factor };
 
-        match self.topics.create(new, validate_only) {
+        match self.create_topic(new, validate_only) {
             Ok(created) => {
                 tracing::info!(topic = %created.name, partitions = num_partitions, validate_only, "topic créé");
                 result

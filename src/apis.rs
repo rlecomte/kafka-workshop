@@ -20,6 +20,7 @@ pub const SUPPORTED_APIS: &[SupportedApi] = &[
     SupportedApi { key: ApiKey::Metadata, min_version: 1, max_version: 13 },
     SupportedApi { key: ApiKey::CreateTopics, min_version: 2, max_version: 7 },
     SupportedApi { key: ApiKey::DescribeConfigs, min_version: 1, max_version: 4 },
+    // ch.2 : à compléter
 ];
 
 /// Renvoie la plage supportée pour `key`, ou `None` si l'API n'est pas implémentée.

@@ -47,8 +47,9 @@ pub async fn serve(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
 async fn handle_connection(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
     socket.set_nodelay(true)?;
     while let Some(frame) = read_frame(&mut socket).await? {
-        let response = broker.handle_request(frame).await?;
-        write_frame(&mut socket, &response).await?;
+        if let Some(response) = broker.handle_request(frame).await? {
+            write_frame(&mut socket, &response).await?;
+        }
     }
     Ok(())
 }

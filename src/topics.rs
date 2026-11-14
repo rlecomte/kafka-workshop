@@ -33,6 +33,8 @@ pub enum TopicError {
     InvalidPartitions(i32),
     InvalidReplicationFactor(i16),
     AlreadyExists(String),
+    /// Erreur d'entrée-sortie lors de la création des logs.
+    Storage(String),
 }
 
 impl TopicError {
@@ -43,6 +45,7 @@ impl TopicError {
             TopicError::InvalidPartitions(_) => ResponseError::InvalidPartitions,
             TopicError::InvalidReplicationFactor(_) => ResponseError::InvalidReplicationFactor,
             TopicError::AlreadyExists(_) => ResponseError::TopicAlreadyExists,
+            TopicError::Storage(_) => ResponseError::KafkaStorageError,
         }
     }
 }
@@ -56,6 +59,7 @@ impl std::fmt::Display for TopicError {
                 write!(f, "facteur de réplication invalide : {n} (un seul broker disponible)")
             }
             TopicError::AlreadyExists(name) => write!(f, "le topic {name} existe déjà"),
+            TopicError::Storage(e) => write!(f, "erreur de stockage : {e}"),
         }
     }
 }

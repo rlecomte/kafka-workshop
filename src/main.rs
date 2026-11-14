@@ -30,6 +30,8 @@ async fn main() -> anyhow::Result<()> {
         cluster_id: env_or("BROKER_CLUSTER_ID", defaults.cluster_id)?,
         default_num_partitions: env_or("BROKER_NUM_PARTITIONS", defaults.default_num_partitions)?,
         auto_create_topics: env_or("BROKER_AUTO_CREATE_TOPICS", defaults.auto_create_topics)?,
+        data_dir: env_or("BROKER_DATA_DIR", defaults.data_dir)?,
+        max_message_bytes: env_or("BROKER_MAX_MESSAGE_BYTES", defaults.max_message_bytes)?,
     };
 
     let listener = TcpListener::bind(("0.0.0.0", config.port))
