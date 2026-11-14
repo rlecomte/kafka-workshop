@@ -64,7 +64,18 @@ impl ReplicaManager {
 
     /// Crée (ou rouvre) les répliques locales de toutes les partitions d'un topic.
     pub fn create_replicas(&self, topic: &Topic) -> io::Result<()> {
-        todo!("ch.2 : create_replicas")
+        for partition in &topic.partitions {
+            let dir = self.data_dir.join(format!("{}-{}", topic.name, partition.index));
+            let log = Log::open(&dir, self.log_config.clone())?;
+            let replica = Arc::new(Replica {
+                topic: topic.name.clone(),
+                topic_id: topic.id,
+                partition: partition.index,
+                log: Mutex::new(log),
+            });
+            self.replicas.write().unwrap().insert((topic.name.clone(), partition.index), replica);
+        }
+        Ok(())
     }
 
     pub fn get(&self, topic: &str, partition: i32) -> Option<Arc<Replica>> {

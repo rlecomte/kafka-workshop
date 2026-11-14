@@ -21,12 +21,16 @@ pub struct Segment {
 impl Segment {
     /// Crée un nouveau segment vide (un fichier existant est écrasé).
     pub fn create(dir: &Path, base_offset: i64) -> io::Result<Segment> {
-        todo!("ch.2 : create")
+        let path = log_file_path(dir, base_offset);
+        let file = OpenOptions::new().create(true).read(true).write(true).truncate(true).open(&path)?;
+        Ok(Segment { base_offset, path, file, size: 0 })
     }
 
     /// Ajoute un batch à la fin du fichier.
     pub fn append(&mut self, batch: &RecordBatch) -> io::Result<()> {
-        todo!("ch.2 : append")
+        self.file.write_all(&batch.bytes)?;
+        self.size += batch.bytes.len() as u64;
+        Ok(())
     }
 
     pub fn size(&self) -> u64 {

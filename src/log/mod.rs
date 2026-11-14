@@ -44,13 +44,27 @@ impl Log {
     /// Pour l'instant, on repart d'un log vide : un éventuel contenu existant
     /// est écrasé. Le rechargement d'un log existant viendra au chapitre 4.
     pub fn open(dir: &Path, config: LogConfig) -> io::Result<Log> {
-        todo!("ch.2 : open")
+        std::fs::create_dir_all(dir)?;
+        let segment = Segment::create(dir, 0)?;
+        Ok(Log {
+            dir: dir.to_path_buf(),
+            config,
+            segments: BTreeMap::from([(0, segment)]),
+            next_offset: 0,
+            log_start_offset: 0,
+        })
     }
 
     /// Ajoute des batches à la fin du log, en leur attribuant leurs offsets.
     /// Renvoie l'offset de base du premier batch.
     pub fn append(&mut self, batches: Vec<RecordBatch>) -> io::Result<i64> {
-        todo!("ch.2 : append")
+        let first_offset = self.next_offset;
+        for mut batch in batches {
+            batch.set_base_offset(self.next_offset);
+            self.active_segment().append(&batch)?;
+            self.next_offset = batch.header.next_offset();
+        }
+        Ok(first_offset)
     }
 
     pub fn log_end_offset(&self) -> i64 {

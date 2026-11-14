@@ -60,7 +60,24 @@ impl RecordBatchHeader {
     /// Décode l'en-tête au début de `buf`, sans rien valider d'autre que la
     /// présence de suffisamment d'octets.
     pub fn parse(mut buf: &[u8]) -> Result<Self, BatchError> {
-        todo!("ch.2 : parse")
+        if buf.len() < HEADER_SIZE {
+            return Err(BatchError::Truncated);
+        }
+        Ok(Self {
+            base_offset: buf.get_i64(),
+            batch_length: buf.get_i32(),
+            partition_leader_epoch: buf.get_i32(),
+            magic: buf.get_i8(),
+            crc: buf.get_u32(),
+            attributes: buf.get_i16(),
+            last_offset_delta: buf.get_i32(),
+            base_timestamp: buf.get_i64(),
+            max_timestamp: buf.get_i64(),
+            producer_id: buf.get_i64(),
+            producer_epoch: buf.get_i16(),
+            base_sequence: buf.get_i32(),
+            records_count: buf.get_i32(),
+        })
     }
 
     /// Taille totale du batch, en-tête compris.
@@ -95,7 +112,8 @@ impl RecordBatch {
     /// Réécrit le `base_offset`, dans l'en-tête décodé et dans les octets.
     /// Ce champ n'est pas couvert par le CRC, qui reste donc valide.
     pub fn set_base_offset(&mut self, offset: i64) {
-        todo!("ch.2 : set_base_offset")
+        self.header.base_offset = offset;
+        self.bytes[0..8].copy_from_slice(&offset.to_be_bytes());
     }
 
     /// Réécrit le `partition_leader_epoch` (également hors du CRC).
@@ -152,11 +170,40 @@ impl std::error::Error for BatchError {}
 
 /// Calcule le CRC-32C d'un batch complet (sur les octets 21..fin).
 pub fn compute_crc(batch: &[u8]) -> u32 {
-    todo!("ch.2 : compute_crc")
+    crc32c::crc32c(&batch[CRC_START..])
 }
 
 /// Découpe le contenu du champ `records` d'une requête Produce en batches,
 /// et valide chacun d'eux.
 pub fn parse_batches(mut records: Bytes) -> Result<Vec<RecordBatch>, BatchError> {
-    todo!("ch.2 : parse_batches")
+    let mut batches = Vec::new();
+    while !records.is_empty() {
+        // Le magic est lu en premier : les anciens formats (v0, v1) ont un
+        // en-tête plus court que 61 octets.
+        if let Some(&magic) = records.get(MAGIC_OFFSET)
+            && magic as i8 != 2
+        {
+            return Err(BatchError::UnsupportedMagic(magic as i8));
+        }
+        let header = RecordBatchHeader::parse(&records)?;
+        if (header.batch_length as usize) < HEADER_SIZE - LOG_OVERHEAD {
+            return Err(BatchError::InvalidLength(header.batch_length));
+        }
+        if records.len() < header.total_size() {
+            return Err(BatchError::Truncated);
+        }
+        let bytes = records.split_to(header.total_size());
+        let actual = compute_crc(&bytes);
+        if actual != header.crc {
+            return Err(BatchError::CorruptCrc { expected: header.crc, actual });
+        }
+        if header.records_count < 1 || header.last_offset_delta != header.records_count - 1 {
+            return Err(BatchError::InvalidRecordCount {
+                records_count: header.records_count,
+                last_offset_delta: header.last_offset_delta,
+            });
+        }
+        batches.push(RecordBatch { header, bytes: BytesMut::from(&bytes[..]) });
+    }
+    Ok(batches)
 }

@@ -9,10 +9,6 @@
 //! - [`log`] : le stockage sur disque d'une partition ;
 //! - [`replica`] : les partitions hébergées par ce broker et leurs logs.
 
-// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
-// certains imports, paramètres et fonctions ne servent pas encore.
-#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
-
 pub mod apis;
 pub mod handlers;
 pub mod log;
@@ -86,6 +82,13 @@ impl Broker {
     /// Crée un topic : l'enregistre dans le registre, puis crée les logs de
     /// ses partitions sur disque.
     pub fn create_topic(&self, new: NewTopic, validate_only: bool) -> Result<Arc<Topic>, TopicError> {
-        todo!("ch.2 : create_topic")
+        let topic = self.topics.create(new, validate_only)?;
+        if !validate_only {
+            self.replicas.create_replicas(&topic).map_err(|e| {
+                tracing::error!(topic = %topic.name, "impossible de créer les logs : {e}");
+                TopicError::Storage(e.to_string())
+            })?;
+        }
+        Ok(topic)
     }
 }

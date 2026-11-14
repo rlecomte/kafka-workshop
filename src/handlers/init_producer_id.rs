@@ -14,6 +14,14 @@ use crate::Broker;
 
 impl Broker {
     pub(super) fn handle_init_producer_id(&self, request: InitProducerIdRequest) -> InitProducerIdResponse {
-        todo!("ch.2 : handle_init_producer_id")
+        if request.transactional_id.is_some() {
+            // Les transactions sont hors du périmètre du workshop.
+            return InitProducerIdResponse::default()
+                .with_error_code(ResponseError::TransactionalIdAuthorizationFailed.code())
+                .with_producer_id(ProducerId(-1))
+                .with_producer_epoch(-1);
+        }
+        let producer_id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
+        InitProducerIdResponse::default().with_producer_id(ProducerId(producer_id)).with_producer_epoch(0)
     }
 }
