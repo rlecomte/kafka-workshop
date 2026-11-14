@@ -11,6 +11,10 @@
 //! - [`groups`] : le coordinateur des consumer groups et leurs offsets ;
 //! - [`cluster`] : le mode cluster, coordonné par etcd.
 
+// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
+// certains imports, paramètres et fonctions ne servent pas encore.
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 pub mod apis;
 pub mod cluster;
 pub mod groups;
@@ -18,6 +22,7 @@ pub mod handlers;
 pub mod log;
 pub mod record_batch;
 pub mod replica;
+pub mod replication;
 pub mod server;
 pub mod topics;
 
@@ -63,6 +68,12 @@ pub struct Config {
     pub offsets_topic_partitions: i32,
     /// Mode cluster (coordonné par etcd), ou `None` pour un broker autonome.
     pub cluster: Option<cluster::ClusterConfig>,
+    /// Nombre minimal de répliques dans l'ISR pour accepter un Produce avec
+    /// acks=all (`min.insync.replicas`).
+    pub min_insync_replicas: usize,
+    /// Un follower qui n'a pas rattrapé le leader depuis ce délai sort de
+    /// l'ISR (`replica.lag.time.max.ms`, 30 s dans Kafka).
+    pub replica_lag_time_max: Duration,
 }
 
 impl Default for Config {
@@ -81,6 +92,8 @@ impl Default for Config {
             group: groups::group::GroupConfig::default(),
             offsets_topic_partitions: 10,
             cluster: None,
+            min_insync_replicas: 1,
+            replica_lag_time_max: Duration::from_secs(10),
         }
     }
 }
@@ -99,6 +112,8 @@ pub struct Broker {
     pub groups: groups::GroupCoordinator,
     /// L'état du cluster, en mode cluster.
     pub cluster: Option<cluster::node::ClusterNode>,
+    /// Les tâches de réplication (une par partition dont ce broker est follower).
+    pub fetchers: replication::Fetchers,
 }
 
 impl Broker {
@@ -106,7 +121,7 @@ impl Broker {
     /// le répertoire de données sont rechargés. En mode cluster, les topics
     /// viendront d'etcd (voir [`Broker::start`]).
     pub fn new(config: Config) -> std::io::Result<Self> {
-        let replicas = replica::ReplicaManager::new(config.data_dir.clone(), config.log.clone());
+        let replicas = replica::ReplicaManager::new(config.node_id, config.data_dir.clone(), config.log.clone());
         let topics = topics::Topics::new(config.node_id);
         if config.cluster.is_none() {
             for topic in replicas.load_existing(config.node_id)? {
@@ -122,6 +137,7 @@ impl Broker {
             replicas,
             next_producer_id: AtomicI64::new(0),
             shutdown: CancellationToken::new(),
+            fetchers: Default::default(),
         };
         if broker.cluster.is_none()
             && let Some(topic) = broker.topics.get(groups::offsets::OFFSETS_TOPIC)
@@ -155,6 +171,18 @@ impl Broker {
         });
     }
 
+    /// Lance une tâche de fond qu'on peut aussi annuler individuellement.
+    pub fn spawn_abortable(&self, task: impl Future<Output = ()> + Send + 'static) -> tokio::task::AbortHandle {
+        let shutdown = self.shutdown.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                _ = task => {}
+            }
+        })
+        .abort_handle()
+    }
+
     /// Démarre le broker : tâches de fond et, en mode cluster, connexion à etcd.
     pub async fn start(self: &Arc<Self>) -> anyhow::Result<()> {
         let broker = self.clone();
@@ -177,8 +205,23 @@ impl Broker {
 
         if self.cluster.is_some() {
             self.join_cluster().await?;
+
+            let broker = self.clone();
+            self.spawn(async move {
+                let mut interval = tokio::time::interval(broker.config.replica_lag_time_max / 2);
+                loop {
+                    interval.tick().await;
+                    broker.shrink_isrs().await;
+                }
+            });
         }
         Ok(())
+    }
+
+    /// Attend que le high watermark de `replica` atteigne `offset`, au plus
+    /// `timeout`. Renvoie `false` en cas de délai dépassé.
+    pub async fn wait_for_high_watermark(&self, replica: &replica::Replica, offset: i64, timeout: Duration) -> bool {
+        todo!("ch.7 : wait_for_high_watermark")
     }
 
     // -----------------------------------------------------------------------

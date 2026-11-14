@@ -15,6 +15,9 @@ use tokio::time::Instant;
 use crate::Broker;
 use crate::log::ReadError;
 
+/// Un follower à ajouter à l'ISR : (topic, partition, nouvelle ISR).
+type IsrExpansion = (String, i32, Vec<i32>);
+
 impl Broker {
     pub(super) async fn handle_fetch(&self, request: FetchRequest) -> FetchResponse {
         let deadline = Instant::now() + Duration::from_millis(request.max_wait_ms.max(0) as u64);
@@ -25,23 +28,31 @@ impl Broker {
             tokio::pin!(notified);
             notified.as_mut().enable();
 
-            let (response, bytes, has_error) = self.read_fetch(&request);
+            let mut expansions = Vec::new();
+            let (response, bytes, has_error) = self.read_fetch(&request, &mut expansions);
+            for (topic, partition, isr) in expansions {
+                tracing::info!(%topic, partition, ?isr, "follower de retour dans l'ISR");
+                self.alter_isr(&topic, partition, isr).await;
+            }
             if bytes >= request.min_bytes.max(0) as usize || has_error || Instant::now() >= deadline {
                 return response;
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 // Délai écoulé : une dernière lecture, puis on répond.
-                return self.read_fetch(&request).0;
+                return self.read_fetch(&request, &mut Vec::new()).0;
             }
         }
     }
 
     /// Lit toutes les partitions demandées. Renvoie la réponse, le nombre
-    /// d'octets lus et s'il y a eu au moins une erreur.
-    fn read_fetch(&self, request: &FetchRequest) -> (FetchResponse, usize, bool) {
+    /// d'octets lus et s'il y a eu au moins une erreur. Les followers qui
+    /// doivent rentrer dans l'ISR sont ajoutés à `expansions`.
+    fn read_fetch(&self, request: &FetchRequest, expansions: &mut Vec<IsrExpansion>) -> (FetchResponse, usize, bool) {
         let mut total = 0usize;
         let mut has_error = false;
         let max_bytes = request.max_bytes.max(0) as usize;
+        // replica_id >= 0 : la requête vient d'un follower (un autre broker).
+        let follower = (request.replica_id.0 >= 0).then_some(request.replica_id.0);
 
         let topics = request
             .topics
@@ -55,7 +66,13 @@ impl Broker {
                         // premier batch renvoyé (sinon un batch plus gros que
                         // max_bytes bloquerait le consumer).
                         let budget = if total == 0 { max_bytes } else { max_bytes.saturating_sub(total) };
-                        let data = self.fetch_partition(topic.topic.as_str(), p, budget.min(p.partition_max_bytes.max(0) as usize));
+                        let data = self.fetch_partition(
+                            topic.topic.as_str(),
+                            p,
+                            budget.min(p.partition_max_bytes.max(0) as usize),
+                            follower,
+                            &mut *expansions,
+                        );
                         let len = data.records.as_ref().map_or(0, |r| r.len());
                         if total > 0 && len > budget {
                             // Ne rentre plus : la partition sera lue au prochain Fetch.
@@ -73,29 +90,14 @@ impl Broker {
         (FetchResponse::default().with_responses(topics), total, has_error)
     }
 
-    fn fetch_partition(&self, topic: &str, p: &FetchPartition, max_bytes: usize) -> PartitionData {
-        let data = PartitionData::default().with_partition_index(p.partition);
-        let replica = match self.leader_replica(topic, p.partition) {
-            Ok(replica) => replica,
-            Err(e) => return data.with_error_code(e.code()).with_high_watermark(-1),
-        };
-        match replica.read(p.fetch_offset, max_bytes) {
-            Ok(read) => data
-                .with_high_watermark(read.high_watermark)
-                .with_last_stable_offset(read.high_watermark)
-                .with_log_start_offset(read.log_start_offset)
-                .with_aborted_transactions(None)
-                .with_records(Some(read.records)),
-            Err(e) => {
-                tracing::debug!(topic, partition = p.partition, "fetch refusé : {e}");
-                let code = match e {
-                    ReadError::OffsetOutOfRange { .. } => ResponseError::OffsetOutOfRange,
-                    ReadError::Io(_) => ResponseError::KafkaStorageError,
-                };
-                data.with_error_code(code.code())
-                    .with_high_watermark(replica.high_watermark())
-                    .with_log_start_offset(replica.log_start_offset())
-            }
-        }
+    fn fetch_partition(
+        &self,
+        topic: &str,
+        p: &FetchPartition,
+        max_bytes: usize,
+        follower: Option<i32>,
+        expansions: &mut Vec<IsrExpansion>,
+    ) -> PartitionData {
+        todo!("ch.7 : fetch_partition")
     }
 }

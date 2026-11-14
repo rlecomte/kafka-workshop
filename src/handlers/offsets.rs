@@ -99,15 +99,7 @@ impl Broker {
 
     /// Écrit des commits dans `__consumer_offsets`, puis les applique en mémoire.
     async fn store_commits(&self, group_id: &str, commits: &[(OffsetKey, OffsetValue)]) -> anyhow::Result<()> {
-        let topic = self.ensure_offsets_topic().await?;
-        let partition = offsets::partition_for(group_id, topic.partitions.len() as i32);
-        let replica = self
-            .leader_replica(OFFSETS_TOPIC, partition)
-            .map_err(|e| anyhow::anyhow!("partition {partition} de {OFFSETS_TOPIC} : {e:?}"))?;
-        let batches = record_batch::parse_batches(offsets::encode_commits(commits))?;
-        replica.append(batches)?;
-        self.groups.apply_commits(commits.to_vec());
-        Ok(())
+        todo!("ch.7 : store_commits")
     }
 
     pub(super) fn handle_offset_fetch(&self, request: OffsetFetchRequest, ctx: &RequestContext) -> OffsetFetchResponse {

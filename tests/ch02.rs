@@ -121,7 +121,10 @@ async fn compressed_batches_are_stored_as_is() {
 
     let path = broker.data_dir.path().join("compressed-0").join("00000000000000000000.log");
     let content = std::fs::read(path).unwrap();
-    assert_eq!(&content[8..compressed.len()], &compressed[8..], "le batch est stocké octet pour octet");
+    // Seuls base_offset (octets 0-7) et partition_leader_epoch (12-15) peuvent
+    // être réécrits par le broker.
+    assert_eq!(&content[8..12], &compressed[8..12], "batch_length inchangé");
+    assert_eq!(&content[16..compressed.len()], &compressed[16..], "le batch est stocké octet pour octet");
 }
 
 #[tokio::test]

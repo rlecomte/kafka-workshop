@@ -71,6 +71,11 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(_) => None,
         },
+        min_insync_replicas: env_or("BROKER_MIN_INSYNC_REPLICAS", defaults.min_insync_replicas)?,
+        replica_lag_time_max: std::time::Duration::from_millis(env_or(
+            "BROKER_REPLICA_LAG_TIME_MAX_MS",
+            defaults.replica_lag_time_max.as_millis() as u64,
+        )?),
     };
 
     let listener = TcpListener::bind(("0.0.0.0", config.port))

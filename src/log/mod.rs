@@ -125,12 +125,30 @@ impl Log {
     /// Ajoute des batches à la fin du log, en leur attribuant leurs offsets.
     /// Renvoie l'offset de base du premier batch.
     pub fn append(&mut self, batches: Vec<RecordBatch>) -> io::Result<i64> {
-        let first_offset = self.next_offset;
-        for mut batch in batches {
-            batch.set_base_offset(self.next_offset);
-            self.append_batch(&batch)?;
-        }
-        Ok(first_offset)
+        self.append_with_epoch(batches, -1)
+    }
+
+    /// Comme [`Log::append`], en inscrivant l'epoch du leader dans chaque batch.
+    pub fn append_with_epoch(&mut self, batches: Vec<RecordBatch>, leader_epoch: i32) -> io::Result<i64> {
+        todo!("ch.7 : append_with_epoch")
+    }
+
+    /// Ajoute des batches qui ont déjà leurs offsets (copiés depuis le leader
+    /// par un follower). Le premier doit commencer au log end offset.
+    pub fn append_replicated(&mut self, batches: Vec<RecordBatch>) -> io::Result<()> {
+        todo!("ch.7 : append_replicated")
+    }
+
+    /// Supprime tout ce qui suit `offset` (exclu) : le log end offset devient
+    /// `offset` (ou le début du batch qui le contient).
+    pub fn truncate_to(&mut self, offset: i64) -> io::Result<()> {
+        todo!("ch.7 : truncate_to")
+    }
+
+    /// Vide le log et le fait recommencer à `offset` (un follower dont le
+    /// leader a supprimé les données par rétention).
+    pub fn reset_to(&mut self, offset: i64) -> io::Result<()> {
+        todo!("ch.7 : reset_to")
     }
 
     /// Ajoute un batch dont l'offset est déjà attribué, en créant un nouveau

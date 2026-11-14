@@ -218,6 +218,12 @@ impl Segment {
         Ok(Bytes::from(buf))
     }
 
+    /// Supprime les batches à partir de `offset` (le batch qui contient
+    /// `offset` est supprimé en entier).
+    pub fn truncate_to(&mut self, offset: i64) -> io::Result<()> {
+        todo!("ch.7 : truncate_to")
+    }
+
     /// Supprime les fichiers du segment.
     pub fn delete(self) -> io::Result<()> {
         let index_path = self.index.path().to_path_buf();

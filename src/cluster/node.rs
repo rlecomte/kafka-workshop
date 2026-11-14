@@ -189,8 +189,9 @@ impl Broker {
     }
 
     /// Met à jour le broker après un changement de l'état du cluster :
-    /// registre des topics, répliques locales, offsets des groupes.
-    pub(crate) fn on_cluster_change(&self) {
+    /// registre des topics, répliques locales et leur rôle, réplication,
+    /// offsets des groupes.
+    pub(crate) fn on_cluster_change(self: &Arc<Self>) {
         let node = self.cluster().unwrap();
         let state = node.state();
         let me = self.config.node_id;
@@ -230,9 +231,27 @@ impl Broker {
                 }
             }
         }
+        // Rôle de chaque réplique locale (leader ou follower, epoch, ISR).
+        for topic in &topics {
+            for partition in &topic.partitions {
+                if let Some(replica) = self.replicas.get(&topic.name, partition.index) {
+                    replica.update_partition_state(partition);
+                }
+            }
+        }
         self.topics.replace_all(topics);
+        self.sync_fetchers();
         self.sync_offsets_partitions();
+        // Le high watermark a pu changer (ISR modifiée).
+        self.replicas.new_data.notify_waiters();
         node.changed.notify_waiters();
+    }
+
+    /// Côté leader : modifie l'ISR d'une partition dans etcd, à condition que
+    /// personne ne l'ait modifiée depuis notre dernière lecture (le controller
+    /// a pu élire un autre leader entre-temps).
+    pub(crate) async fn alter_isr(&self, topic: &str, partition: i32, isr: Vec<i32>) {
+        todo!("ch.7 : alter_isr")
     }
 
     /// Charge les offsets des partitions de `__consumer_offsets` dont ce

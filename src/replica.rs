@@ -9,8 +9,11 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use tokio::sync::Notify;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::log::{Log, LogConfig, ReadError};
@@ -27,12 +30,48 @@ pub struct Replica {
     pub topic: String,
     pub topic_id: Uuid,
     pub partition: i32,
+    /// L'identifiant de ce broker.
+    node_id: i32,
     /// Le log est protégé par un `Mutex` : les écritures sont sérialisées.
     /// C'est un `std::sync::Mutex`, on ne le garde jamais pendant un `.await`.
     log: Mutex<Log>,
-    /// Réveille les `Fetch` en attente quand de nouvelles données sont
-    /// disponibles. Partagé par toutes les répliques du broker.
+    /// Le rôle de la réplique et l'état de la réplication.
+    state: Mutex<ReplicationState>,
+    /// Réveille les requêtes en attente (Fetch, Produce avec acks=all) quand
+    /// des données arrivent ou que le high watermark avance. Partagé par
+    /// toutes les répliques du broker.
     new_data: Arc<Notify>,
+}
+
+/// L'état de la réplication d'une partition, vu par cette réplique.
+#[derive(Debug, Clone)]
+struct ReplicationState {
+    is_leader: bool,
+    leader_epoch: i32,
+    isr: Vec<i32>,
+    /// L'offset jusqu'où les données sont répliquées sur toute l'ISR, donc
+    /// visibles par les consumers.
+    high_watermark: i64,
+    /// Côté leader : la position de chaque follower.
+    followers: HashMap<i32, FollowerState>,
+}
+
+/// Ce que le leader sait d'un follower.
+#[derive(Debug, Clone, Copy)]
+pub struct FollowerState {
+    /// Le log end offset du follower (l'offset de son dernier Fetch).
+    pub log_end_offset: i64,
+    /// La dernière fois que le follower était à jour.
+    pub last_caught_up: Instant,
+}
+
+/// Le résultat d'une écriture dans le log.
+#[derive(Debug, Clone, Copy)]
+pub struct AppendInfo {
+    pub base_offset: i64,
+    /// L'offset qui suit le dernier record écrit.
+    pub next_offset: i64,
+    pub log_start_offset: i64,
 }
 
 /// Le résultat d'une lecture dans le log.
@@ -43,35 +82,108 @@ pub struct FetchData {
     pub log_start_offset: i64,
 }
 
-/// Le résultat d'une écriture dans le log.
-#[derive(Debug, Clone, Copy)]
-pub struct AppendInfo {
-    pub base_offset: i64,
-    pub log_start_offset: i64,
-}
-
 impl Replica {
-    pub fn append(&self, batches: Vec<RecordBatch>) -> io::Result<AppendInfo> {
-        let mut log = self.log.lock().unwrap();
-        let base_offset = log.append(batches)?;
-        let info = AppendInfo { base_offset, log_start_offset: log.log_start_offset() };
-        drop(log);
-        self.new_data.notify_waiters();
-        Ok(info)
-    }
-
-    /// Lit des batches à partir de `offset`, sans dépasser le high watermark.
-    pub fn read(&self, offset: i64, max_bytes: usize) -> Result<FetchData, ReadError> {
-        let log = self.log.lock().unwrap();
+    fn new(topic: &str, topic_id: Uuid, partition: i32, node_id: i32, log: Log, new_data: Arc<Notify>) -> Replica {
         let high_watermark = log.log_end_offset();
-        let records = log.read(offset, max_bytes, high_watermark)?;
-        Ok(FetchData { records, high_watermark, log_start_offset: log.log_start_offset() })
+        Replica {
+            topic: topic.to_string(),
+            topic_id,
+            partition,
+            node_id,
+            log: Mutex::new(log),
+            // Par défaut (mode autonome) : seule réplique, donc leader.
+            state: Mutex::new(ReplicationState {
+                is_leader: true,
+                leader_epoch: 0,
+                isr: vec![node_id],
+                high_watermark,
+                followers: HashMap::new(),
+            }),
+            new_data,
+        }
     }
 
-    /// Le high watermark : le dernier offset (exclu) visible par les
-    /// consumers. Avec une seule réplique, c'est le log end offset.
+    /// Écrit des batches en tant que leader : attribue les offsets, puis met
+    /// à jour le high watermark.
+    pub fn append(&self, batches: Vec<RecordBatch>) -> io::Result<AppendInfo> {
+        todo!("ch.7 : append")
+    }
+
+    /// Écrit des batches copiés depuis le leader (follower), puis adopte le
+    /// high watermark du leader (sans dépasser son propre log end offset).
+    pub fn append_as_follower(&self, batches: Vec<RecordBatch>, leader_high_watermark: i64) -> io::Result<()> {
+        todo!("ch.7 : append_as_follower")
+    }
+
+    /// Lecture pour un consumer : jusqu'au high watermark.
+    pub fn read(&self, offset: i64, max_bytes: usize) -> Result<FetchData, ReadError> {
+        todo!("ch.7 : read")
+    }
+
+    /// Lecture pour un follower : jusqu'au log end offset.
+    pub fn read_for_follower(&self, offset: i64, max_bytes: usize) -> Result<FetchData, ReadError> {
+        todo!("ch.7 : read_for_follower")
+    }
+
+    /// Le high watermark : l'offset (exclu) jusqu'où les données sont visibles
+    /// par les consumers.
     pub fn high_watermark(&self) -> i64 {
+        self.state.lock().unwrap().high_watermark
+    }
+
+    pub fn log_end_offset(&self) -> i64 {
         self.log.lock().unwrap().log_end_offset()
+    }
+
+    pub fn log_start_offset(&self) -> i64 {
+        self.log.lock().unwrap().log_start_offset()
+    }
+
+    pub fn is_leader(&self) -> bool {
+        self.state.lock().unwrap().is_leader
+    }
+
+    pub fn leader_epoch(&self) -> i32 {
+        self.state.lock().unwrap().leader_epoch
+    }
+
+    pub fn isr(&self) -> Vec<i32> {
+        self.state.lock().unwrap().isr.clone()
+    }
+
+    /// Met à jour le rôle de la réplique d'après les métadonnées du cluster.
+    /// Renvoie `true` si la réplique vient de devenir leader ou follower.
+    pub fn update_partition_state(&self, partition: &Partition) -> bool {
+        todo!("ch.7 : update_partition_state")
+    }
+
+    /// Côté leader : enregistre le Fetch d'un follower. Son `fetch_offset`
+    /// indique qu'il a tout ce qui précède. Renvoie la nouvelle ISR si le
+    /// follower doit y entrer (il a rattrapé le high watermark).
+    pub fn record_follower_fetch(&self, follower: i32, fetch_offset: i64) -> Option<Vec<i32>> {
+        todo!("ch.7 : record_follower_fetch")
+    }
+
+    /// Côté leader : la nouvelle ISR si des followers sont en retard depuis
+    /// plus de `max_lag`.
+    pub fn isr_to_shrink(&self, max_lag: Duration) -> Option<Vec<i32>> {
+        todo!("ch.7 : isr_to_shrink")
+    }
+
+    /// Côté leader : le high watermark est le plus petit log end offset des
+    /// répliques de l'ISR. Il ne recule jamais.
+    fn update_high_watermark(&self) {
+        todo!("ch.7 : update_high_watermark")
+    }
+
+    /// Supprime tout ce qui suit `offset` (follower qui a divergé du leader).
+    pub fn truncate_to(&self, offset: i64) -> io::Result<()> {
+        todo!("ch.7 : truncate_to")
+    }
+
+    /// Vide le log et le fait recommencer à `offset`.
+    pub fn reset_to(&self, offset: i64) -> io::Result<()> {
+        todo!("ch.7 : reset_to")
     }
 
     pub fn offset_for_timestamp(&self, timestamp: i64) -> std::io::Result<Option<i64>> {
@@ -106,19 +218,12 @@ impl Replica {
     pub fn apply_retention(&self, now_ms: i64) -> io::Result<usize> {
         self.log.lock().unwrap().apply_retention(now_ms)
     }
-
-    pub fn log_end_offset(&self) -> i64 {
-        self.log.lock().unwrap().log_end_offset()
-    }
-
-    pub fn log_start_offset(&self) -> i64 {
-        self.log.lock().unwrap().log_start_offset()
-    }
 }
 
 /// L'ensemble des répliques locales, indexées par (topic, partition).
 #[derive(Debug)]
 pub struct ReplicaManager {
+    node_id: i32,
     data_dir: PathBuf,
     log_config: LogConfig,
     replicas: RwLock<HashMap<(String, i32), Arc<Replica>>>,
@@ -127,8 +232,8 @@ pub struct ReplicaManager {
 }
 
 impl ReplicaManager {
-    pub fn new(data_dir: PathBuf, log_config: LogConfig) -> Self {
-        Self { data_dir, log_config, replicas: RwLock::default(), new_data: Arc::new(Notify::new()) }
+    pub fn new(node_id: i32, data_dir: PathBuf, log_config: LogConfig) -> Self {
+        Self { node_id, data_dir, log_config, replicas: RwLock::default(), new_data: Arc::new(Notify::new()) }
     }
 
     /// Crée (ou rouvre) les répliques locales de toutes les partitions d'un topic.
@@ -152,13 +257,7 @@ impl ReplicaManager {
         }
         let log = Log::open(&dir, config)?;
         std::fs::write(dir.join(PARTITION_METADATA), format!("version: 0\ntopic_id: {topic_id}\n"))?;
-        let replica = Arc::new(Replica {
-            topic: topic.to_string(),
-            topic_id,
-            partition,
-            log: Mutex::new(log),
-            new_data: self.new_data.clone(),
-        });
+        let replica = Arc::new(Replica::new(topic, topic_id, partition, self.node_id, log, self.new_data.clone()));
         self.replicas.write().unwrap().insert((topic.to_string(), partition), replica.clone());
         Ok(replica)
     }
