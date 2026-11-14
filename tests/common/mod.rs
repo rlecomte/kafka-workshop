@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use broker::{Broker, Config};
 use bytes::{Bytes, BytesMut};
-use kafka_protocol::messages::{ApiKey, RequestHeader, ResponseHeader};
+use kafka_protocol::messages::{ApiKey, BrokerId, RequestHeader, ResponseHeader};
 use kafka_protocol::protocol::{Decodable, Encodable, HeaderVersion, Request, StrBytes};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -253,4 +253,55 @@ pub fn produce_request(topic: &str, partition: i32, records: Bytes, acks: i16) -
 pub async fn produce(client: &mut Client, topic: &str, partition: i32, records: Bytes) -> PartitionProduceResponse {
     let response = client.send(produce_request(topic, partition, records, -1), 9).await.unwrap();
     response.responses[0].partition_responses[0].clone()
+}
+
+// ---------------------------------------------------------------------------
+// Fetch et ListOffsets
+// ---------------------------------------------------------------------------
+
+use kafka_protocol::messages::fetch_request::{FetchPartition, FetchTopic};
+use kafka_protocol::messages::fetch_response::PartitionData;
+use kafka_protocol::messages::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+use kafka_protocol::messages::list_offsets_response::ListOffsetsPartitionResponse;
+use kafka_protocol::messages::{FetchRequest, ListOffsetsRequest};
+
+pub const FETCH_VERSION: i16 = 12;
+
+/// Une requête Fetch « consumer » pour une partition, sans attente.
+pub fn fetch_request(topic: &str, partition: i32, offset: i64, max_bytes: i32) -> FetchRequest {
+    FetchRequest::default()
+        .with_replica_id(BrokerId(-1))
+        .with_max_wait_ms(0)
+        .with_min_bytes(0)
+        .with_max_bytes(max_bytes)
+        .with_session_id(0)
+        .with_session_epoch(-1)
+        .with_topics(vec![FetchTopic::default().with_topic(topic_name(topic)).with_partitions(vec![
+            FetchPartition::default()
+                .with_partition(partition)
+                .with_fetch_offset(offset)
+                .with_partition_max_bytes(max_bytes),
+        ])])
+}
+
+/// Lit une partition à partir de `offset` (sans attente) et renvoie les
+/// données de la partition.
+pub async fn fetch(client: &mut Client, topic: &str, partition: i32, offset: i64) -> PartitionData {
+    let response = client.send(fetch_request(topic, partition, offset, 1024 * 1024), FETCH_VERSION).await.unwrap();
+    response.responses[0].partitions[0].clone()
+}
+
+/// Les records renvoyés par un Fetch.
+pub fn fetched_records(data: &PartitionData) -> Vec<Record> {
+    decode_records(data.records.clone().unwrap_or_default())
+}
+
+pub async fn list_offset(client: &mut Client, topic: &str, partition: i32, timestamp: i64) -> ListOffsetsPartitionResponse {
+    let request = ListOffsetsRequest::default().with_replica_id(BrokerId(-1)).with_topics(vec![
+        ListOffsetsTopic::default().with_name(topic_name(topic)).with_partitions(vec![
+            ListOffsetsPartition::default().with_partition_index(partition).with_timestamp(timestamp),
+        ]),
+    ]);
+    let response = client.send(request, 7).await.unwrap();
+    response.topics[0].partitions[0].clone()
 }

@@ -33,10 +33,17 @@ pub async fn serve(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
         tokio::spawn(async move {
             match handle_connection(socket, broker).await {
                 Ok(()) => tracing::debug!(%peer, "connexion fermée par le client"),
+                Err(e) if is_disconnect(&e) => tracing::debug!(%peer, "client déconnecté : {e}"),
                 Err(e) => tracing::warn!(%peer, "connexion fermée : {e:#}"),
             }
         });
     }
+}
+
+/// Le client a fermé la connexion pendant qu'on lui répondait : rien d'anormal.
+fn is_disconnect(e: &anyhow::Error) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionReset};
+    e.downcast_ref::<std::io::Error>().is_some_and(|e| matches!(e.kind(), BrokenPipe | ConnectionReset))
 }
 
 /// Traite une connexion : lit une requête, calcule la réponse, l'écrit, et

@@ -4,9 +4,12 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-use crate::record_batch::RecordBatch;
+use bytes::Bytes;
+
+use crate::record_batch::{HEADER_SIZE, RecordBatch, RecordBatchHeader};
 
 #[derive(Debug)]
 pub struct Segment {
@@ -31,6 +34,38 @@ impl Segment {
         self.file.write_all(&batch.bytes)?;
         self.size += batch.bytes.len() as u64;
         Ok(())
+    }
+
+    /// Lit l'en-tête du batch qui commence à la position `position` du fichier.
+    pub fn read_header(&self, position: u64) -> io::Result<RecordBatchHeader> {
+        todo!("ch.3 : read_header")
+    }
+
+    /// Parcourt les en-têtes des batches du segment, à partir de la position
+    /// `from`. Renvoie des couples (position, en-tête).
+    pub fn headers(&self, from: u64) -> impl Iterator<Item = io::Result<(u64, RecordBatchHeader)>> + '_ {
+        let mut position = from;
+        std::iter::from_fn(move || {
+            if position >= self.size {
+                return None;
+            }
+            let result = self.read_header(position).map(|header| {
+                let at = position;
+                position += header.total_size() as u64;
+                (at, header)
+            });
+            if result.is_err() {
+                position = self.size; // on s'arrête à la première erreur
+            }
+            Some(result)
+        })
+    }
+
+    /// Lit des batches entiers à partir de celui qui contient `offset`, sans
+    /// dépasser `max_bytes` (sauf pour le premier batch, toujours renvoyé en
+    /// entier) ni inclure de batch commençant à `max_offset` ou au-delà.
+    pub fn read(&self, offset: i64, max_bytes: usize, max_offset: i64) -> io::Result<Bytes> {
+        todo!("ch.3 : read")
     }
 
     pub fn size(&self) -> u64 {

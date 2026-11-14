@@ -11,8 +11,36 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use bytes::Bytes;
+
 use crate::record_batch::RecordBatch;
 use segment::Segment;
+
+/// Les erreurs de lecture du log.
+#[derive(Debug)]
+pub enum ReadError {
+    /// L'offset demandé est avant le début ou après la fin du log.
+    OffsetOutOfRange { offset: i64, log_start_offset: i64, log_end_offset: i64 },
+    Io(io::Error),
+}
+
+impl From<io::Error> for ReadError {
+    fn from(e: io::Error) -> Self {
+        ReadError::Io(e)
+    }
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::OffsetOutOfRange { offset, log_start_offset, log_end_offset } => write!(
+                f,
+                "offset {offset} hors du log [{log_start_offset}, {log_end_offset}]"
+            ),
+            ReadError::Io(e) => write!(f, "erreur de lecture : {e}"),
+        }
+    }
+}
 
 /// Paramètres d'un log.
 #[derive(Debug, Clone)]
@@ -65,6 +93,21 @@ impl Log {
             self.next_offset = batch.header.next_offset();
         }
         Ok(first_offset)
+    }
+
+    /// Lit des batches à partir de `offset`, sur `max_bytes` octets au plus
+    /// (le premier batch est toujours renvoyé en entier, même s'il est plus
+    /// gros), sans renvoyer de batch commençant à `max_offset` ou au-delà.
+    ///
+    /// Un offset égal au log end offset est valide : la lecture est vide.
+    pub fn read(&self, offset: i64, max_bytes: usize, max_offset: i64) -> Result<Bytes, ReadError> {
+        todo!("ch.3 : read")
+    }
+
+    /// Le premier offset dont le batch a un timestamp supérieur ou égal à
+    /// `timestamp` (à la granularité du batch), ou `None`.
+    pub fn offset_for_timestamp(&self, timestamp: i64) -> io::Result<Option<i64>> {
+        todo!("ch.3 : offset_for_timestamp")
     }
 
     pub fn log_end_offset(&self) -> i64 {

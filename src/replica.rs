@@ -9,9 +9,11 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
+use bytes::Bytes;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::log::{Log, LogConfig};
+use crate::log::{Log, LogConfig, ReadError};
 use crate::record_batch::RecordBatch;
 use crate::topics::Topic;
 
@@ -24,6 +26,17 @@ pub struct Replica {
     /// Le log est protégé par un `Mutex` : les écritures sont sérialisées.
     /// C'est un `std::sync::Mutex`, on ne le garde jamais pendant un `.await`.
     log: Mutex<Log>,
+    /// Réveille les `Fetch` en attente quand de nouvelles données sont
+    /// disponibles. Partagé par toutes les répliques du broker.
+    new_data: Arc<Notify>,
+}
+
+/// Le résultat d'une lecture dans le log.
+#[derive(Debug, Clone)]
+pub struct FetchData {
+    pub records: Bytes,
+    pub high_watermark: i64,
+    pub log_start_offset: i64,
 }
 
 /// Le résultat d'une écriture dans le log.
@@ -35,9 +48,22 @@ pub struct AppendInfo {
 
 impl Replica {
     pub fn append(&self, batches: Vec<RecordBatch>) -> io::Result<AppendInfo> {
-        let mut log = self.log.lock().unwrap();
-        let base_offset = log.append(batches)?;
-        Ok(AppendInfo { base_offset, log_start_offset: log.log_start_offset() })
+        todo!("ch.3 : append")
+    }
+
+    /// Lit des batches à partir de `offset`, sans dépasser le high watermark.
+    pub fn read(&self, offset: i64, max_bytes: usize) -> Result<FetchData, ReadError> {
+        todo!("ch.3 : read")
+    }
+
+    /// Le high watermark : le dernier offset (exclu) visible par les
+    /// consumers. Avec une seule réplique, c'est le log end offset.
+    pub fn high_watermark(&self) -> i64 {
+        todo!("ch.3 : high_watermark")
+    }
+
+    pub fn offset_for_timestamp(&self, timestamp: i64) -> std::io::Result<Option<i64>> {
+        todo!("ch.3 : offset_for_timestamp")
     }
 
     pub fn log_end_offset(&self) -> i64 {
@@ -55,11 +81,13 @@ pub struct ReplicaManager {
     data_dir: PathBuf,
     log_config: LogConfig,
     replicas: RwLock<HashMap<(String, i32), Arc<Replica>>>,
+    /// Notifié à chaque écriture dans une réplique.
+    pub new_data: Arc<Notify>,
 }
 
 impl ReplicaManager {
     pub fn new(data_dir: PathBuf, log_config: LogConfig) -> Self {
-        Self { data_dir, log_config, replicas: RwLock::default() }
+        Self { data_dir, log_config, replicas: RwLock::default(), new_data: Arc::new(Notify::new()) }
     }
 
     /// Crée (ou rouvre) les répliques locales de toutes les partitions d'un topic.
@@ -72,6 +100,7 @@ impl ReplicaManager {
                 topic_id: topic.id,
                 partition: partition.index,
                 log: Mutex::new(log),
+                new_data: self.new_data.clone(),
             });
             self.replicas.write().unwrap().insert((topic.name.clone(), partition.index), replica);
         }

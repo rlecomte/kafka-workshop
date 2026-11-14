@@ -9,6 +9,10 @@
 //! - [`log`] : le stockage sur disque d'une partition ;
 //! - [`replica`] : les partitions hébergées par ce broker et leurs logs.
 
+// Squelette du workshop : tant que les `todo!()` ne sont pas remplacés,
+// certains imports, paramètres et fonctions ne servent pas encore.
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 pub mod apis;
 pub mod handlers;
 pub mod log;

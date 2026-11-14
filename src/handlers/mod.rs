@@ -23,7 +23,9 @@
 mod api_versions;
 mod create_topics;
 mod describe_configs;
+mod fetch;
 mod init_producer_id;
+mod list_offsets;
 mod metadata;
 mod produce;
 
@@ -76,6 +78,8 @@ impl Broker {
                 None => return Ok(None),
             },
             RequestKind::InitProducerId(req) => ResponseKind::InitProducerId(self.handle_init_producer_id(req)),
+            RequestKind::Fetch(req) => ResponseKind::Fetch(self.handle_fetch(req).await),
+            RequestKind::ListOffsets(req) => ResponseKind::ListOffsets(self.handle_list_offsets(req)),
             other => bail!("pas de handler pour {other:?}"),
         };
 
