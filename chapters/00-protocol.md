@@ -129,11 +129,26 @@ Fonctions utiles de la crate :
 ### 3. Le handler ApiVersions : `src/handlers/api_versions.rs`
 
 Votre premier handler, et le plus simple : il ne fait que décrire le broker.
-Construisez la réponse à partir de `apis::SUPPORTED_APIS`.
+Il y a deux fonctions à écrire, qui construisent toutes les deux une
+`ApiVersionsResponse`.
 
-Il faut aussi la réponse d'erreur `UNSUPPORTED_VERSION`, utilisée par le
-dispatch (voir [« Sous le capot »](#sous-le-capot)). Le code d'erreur
-s'obtient avec `kafka_protocol::ResponseError::UnsupportedVersion.code()`.
+- `handle_api_versions` : la réponse normale. Son `error_code` vaut 0, et
+  son champ `api_keys` contient une entrée par API de
+  `apis::SUPPORTED_APIS`, avec sa plage de versions (`api_key`,
+  `min_version`, `max_version`). Pour l'instant, la réponse dit donc
+  seulement « je sais traiter `ApiVersions`, de la v0 à la v4 ». Comme elle
+  est construite à partir de la liste, elle s'enrichira d'elle-même à chaque
+  chapitre.
+- `unsupported_version_response` : la même réponse, mais avec le code
+  d'erreur `UNSUPPORTED_VERSION`
+  (`kafka_protocol::ResponseError::UnsupportedVersion.code()`). La liste des
+  API y figure aussi : c'est grâce à elle que le client peut réessayer dans
+  une version que le broker accepte.
+
+Le handler n'appelle pas cette seconde fonction. C'est le dispatch
+(étape 2) qui l'utilise, quand un client envoie `ApiVersions` dans une
+version trop récente : il ne décode pas la requête et encode cette réponse
+en v0. Les détails sont dans [« Sous le capot »](#sous-le-capot).
 
 ## Vérifier
 
