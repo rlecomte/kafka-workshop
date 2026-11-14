@@ -34,6 +34,11 @@ impl Drop for TestBroker {
 }
 
 pub async fn start_broker() -> TestBroker {
+    start_broker_with(Config::default()).await
+}
+
+/// Lance un broker avec une configuration donnée (host et port sont écrasés).
+pub async fn start_broker_with(config: Config) -> TestBroker {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
@@ -43,7 +48,7 @@ pub async fn start_broker() -> TestBroker {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let config = Config { node_id: 0, host: "127.0.0.1".into(), port: addr.port() };
+    let config = Config { host: "127.0.0.1".into(), port: addr.port(), ..config };
     let task = tokio::spawn(broker::server::serve(listener, Arc::new(Broker::new(config))));
     TestBroker { addr, task }
 }

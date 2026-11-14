@@ -21,6 +21,9 @@
 //! ```
 
 mod api_versions;
+mod create_topics;
+mod describe_configs;
+mod metadata;
 
 use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
@@ -62,6 +65,9 @@ impl Broker {
 
         let response = match request {
             RequestKind::ApiVersions(req) => ResponseKind::ApiVersions(self.handle_api_versions(req)),
+            RequestKind::Metadata(req) => ResponseKind::Metadata(self.handle_metadata(req)),
+            RequestKind::CreateTopics(req) => ResponseKind::CreateTopics(self.handle_create_topics(req)),
+            RequestKind::DescribeConfigs(req) => ResponseKind::DescribeConfigs(self.handle_describe_configs(req)),
             other => bail!("pas de handler pour {other:?}"),
         };
 

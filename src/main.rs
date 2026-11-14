@@ -22,10 +22,14 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
+    let defaults = Config::default();
     let config = Config {
-        node_id: env_or("BROKER_NODE_ID", 0)?,
-        host: env_or("BROKER_HOST", "localhost".to_string())?,
-        port: env_or("BROKER_PORT", 9092)?,
+        node_id: env_or("BROKER_NODE_ID", defaults.node_id)?,
+        host: env_or("BROKER_HOST", defaults.host)?,
+        port: env_or("BROKER_PORT", defaults.port)?,
+        cluster_id: env_or("BROKER_CLUSTER_ID", defaults.cluster_id)?,
+        default_num_partitions: env_or("BROKER_NUM_PARTITIONS", defaults.default_num_partitions)?,
+        auto_create_topics: env_or("BROKER_AUTO_CREATE_TOPICS", defaults.auto_create_topics)?,
     };
 
     let listener = TcpListener::bind(("0.0.0.0", config.port))

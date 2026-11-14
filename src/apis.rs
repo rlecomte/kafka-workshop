@@ -16,6 +16,7 @@ pub struct SupportedApi {
 pub const SUPPORTED_APIS: &[SupportedApi] = &[
     // ch.0
     SupportedApi { key: ApiKey::ApiVersions, min_version: 0, max_version: 4 },
+    // ch.1 : à compléter
 ];
 
 /// Renvoie la plage supportée pour `key`, ou `None` si l'API n'est pas implémentée.

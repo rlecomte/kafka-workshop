@@ -7,7 +7,7 @@ mod common;
 use bytes::{BufMut, BytesMut};
 use common::{Client, start_broker};
 use kafka_protocol::ResponseError;
-use kafka_protocol::messages::{ApiKey, ApiVersionsRequest, ApiVersionsResponse, MetadataRequest};
+use kafka_protocol::messages::{ApiKey, ApiVersionsRequest, ApiVersionsResponse, SaslHandshakeRequest};
 use kafka_protocol::protocol::{Decodable, StrBytes};
 
 fn api_versions_request() -> ApiVersionsRequest {
@@ -173,13 +173,14 @@ async fn concurrent_connections() {
 }
 
 /// Une API non implémentée ferme la connexion, mais le broker continue de
-/// servir les autres clients.
+/// servir les autres clients. (SaslHandshake : la sécurité est hors du
+/// périmètre du workshop, cette API ne sera jamais implémentée.)
 #[tokio::test]
 async fn unsupported_api_closes_connection_only() {
     let broker = start_broker().await;
 
     let mut client = Client::connect(broker.addr).await;
-    client.send_only(&MetadataRequest::default(), 12).await.unwrap();
+    client.send_only(&SaslHandshakeRequest::default(), 1).await.unwrap();
     client.assert_closed().await;
 
     let mut other = Client::connect(broker.addr).await;
